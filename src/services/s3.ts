@@ -2,6 +2,7 @@ import {
   CopyObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -83,4 +84,42 @@ export async function copyObject(params: { fromKey: string; toKey: string; conte
 export async function deleteObject(key: string): Promise<void> {
   const e = requireAws();
   await getS3Client().send(new DeleteObjectCommand({ Bucket: e.bucket, Key: key }));
+}
+
+export type ListedObject = {
+  key: string;
+  publicUrl: string;
+  lastModified: string;
+  size: number;
+};
+
+export async function listObjectsByPrefix(params: {
+  prefix: string;
+  maxKeys?: number;
+  continuationToken?: string;
+}): Promise<{ items: ListedObject[]; nextContinuationToken?: string }> {
+  const e = requireAws();
+  const out = await getS3Client().send(
+    new ListObjectsV2Command({
+      Bucket: e.bucket,
+      Prefix: params.prefix,
+      MaxKeys: Math.min(params.maxKeys ?? 100, 1000),
+      ContinuationToken: params.continuationToken,
+    })
+  );
+
+  const items: ListedObject[] = (out.Contents ?? [])
+    .filter((c) => c.Key && !c.Key.endsWith("/"))
+    .map((c) => ({
+      key: c.Key as string,
+      publicUrl: s3KeyToPublicUrl(c.Key as string),
+      lastModified: c.LastModified?.toISOString() ?? "",
+      size: c.Size ?? 0,
+    }))
+    .sort((a, b) => b.lastModified.localeCompare(a.lastModified));
+
+  return {
+    items,
+    nextContinuationToken: out.IsTruncated ? out.NextContinuationToken : undefined,
+  };
 }
