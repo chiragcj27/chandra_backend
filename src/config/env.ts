@@ -24,10 +24,32 @@ export const env = {
   PASSWORD_SEED: required("PASSWORD_SEED"),
   ADMIN_EMAIL: process.env.ADMIN_EMAIL,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
-  AWS_REGION: required("AWS_REGION"),
-  S3_BUCKET: required("S3_BUCKET"),
-  S3_PUBLIC_BASE_URL: required("S3_PUBLIC_BASE_URL"),
-  AWS_ACCESS_KEY_ID: required("AWS_ACCESS_KEY_ID"),
-  AWS_SECRET_ACCESS_KEY: required("AWS_SECRET_ACCESS_KEY"),
+  /**
+   * Optional. When all of these are set, S3 helpers (uploads, banners, etc.) work.
+   * If omitted, the server still starts; routes that need S3 will return 503.
+   */
+  aws: readAwsConfig(),
 } as const;
+
+export type AwsConfig = {
+  region: string;
+  bucket: string;
+  publicBaseUrl: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+};
+
+function readAwsConfig(): AwsConfig | null {
+  const region = process.env.AWS_REGION?.trim();
+  const bucket = process.env.S3_BUCKET?.trim();
+  const publicBaseUrl = process.env.S3_PUBLIC_BASE_URL?.trim();
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID?.trim();
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY?.trim();
+
+  if (!region || !bucket || !publicBaseUrl || !accessKeyId || !secretAccessKey) {
+    return null;
+  }
+
+  return { region, bucket, publicBaseUrl, accessKeyId, secretAccessKey };
+}
 

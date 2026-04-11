@@ -1,0 +1,12 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# For an existing Web Service, set in the dashboard:
+#   Build Command:  npm install   (postinstall runs `npm run build` → creates dist/)
+#   Start Command:  npm start
+services:
+  - type: web
+    name: chandra-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health

@@ -34,8 +34,10 @@ async function start() {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
-start().catch((err) => {
-  console.error("Failed to start server:", err);
+start().catch((err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error("Failed to start server:", message);
+  if (err instanceof Error && err.stack) console.error(err.stack);
   process.exit(1);
 });
 
