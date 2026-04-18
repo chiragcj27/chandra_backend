@@ -139,6 +139,135 @@ router.post("/categories", requireAuth, requireRole("admin"), async (req, res) =
   }
 });
 
+router.put("/categories/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  let finalKey: string | null = null;
+  let tmpKeyToCleanup: string | null = null;
+  const bannerFinalKeys: string[] = [];
+  const bannerTmpKeysToCleanup: string[] = [];
+  try {
+    const id = getSingleParamValue(req.params.id);
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const body = req.body as {
+      name?: string;
+      displayOrder?: number;
+      isActive?: boolean;
+      tmpKey?: string;
+      categoryBannerTmpKeys?: string[];
+    };
+
+    const category = await Category.findById(id);
+    if (!category) return res.status(404).json({ error: "Category not found" });
+
+    const name = asTrimmedString(body.name);
+    if (typeof name === "string") category.name = name;
+
+    if (Number.isFinite(body.displayOrder)) category.displayOrder = Number(body.displayOrder);
+    if (typeof body.isActive === "boolean") category.isActive = body.isActive;
+
+    const tmpKey = asTrimmedString(body.tmpKey);
+    tmpKeyToCleanup = tmpKey ?? null;
+    if (tmpKey) {
+      if (!tmpKey.startsWith("tmp/")) return res.status(400).json({ error: "tmpKey must start with tmp/" });
+      const exists = await headObject(tmpKey);
+      if (!exists) return res.status(400).json({ error: "Uploaded file not found on S3" });
+      const fileSuffix = tmpKey.split("/").pop() ?? crypto.randomUUID();
+      finalKey = `categories/${crypto.randomUUID()}-${fileSuffix}`;
+      await copyObject({ fromKey: tmpKey, toKey: finalKey });
+      category.thumbnailImage = s3KeyToPublicUrl(finalKey);
+      await deleteObject(tmpKey);
+      tmpKeyToCleanup = null;
+    }
+
+    const categoryBannerTmpKeys = Array.isArray(body.categoryBannerTmpKeys)
+      ? body.categoryBannerTmpKeys
+          .map((key) => asTrimmedString(key))
+          .filter((key): key is string => Boolean(key))
+      : [];
+    if (categoryBannerTmpKeys.some((key) => !key.startsWith("tmp/"))) {
+      return res.status(400).json({ error: "All categoryBannerTmpKeys must start with tmp/" });
+    }
+
+    if (categoryBannerTmpKeys.length > 0) {
+      for (const bannerTmpKey of categoryBannerTmpKeys) {
+        const exists = await headObject(bannerTmpKey);
+        if (!exists) {
+          return res.status(400).json({ error: "One or more category banner uploads are missing on S3" });
+        }
+        const bannerSuffix = bannerTmpKey.split("/").pop() ?? crypto.randomUUID();
+        const bannerFinalKey = `categories/${crypto.randomUUID()}-${bannerSuffix}`;
+        await copyObject({ fromKey: bannerTmpKey, toKey: bannerFinalKey });
+        bannerFinalKeys.push(bannerFinalKey);
+        bannerTmpKeysToCleanup.push(bannerTmpKey);
+      }
+      category.categoryBannerImages = bannerFinalKeys.map((key) => s3KeyToPublicUrl(key));
+    }
+
+    await category.save();
+
+    for (const bannerTmpKey of bannerTmpKeysToCleanup) {
+      await deleteObject(bannerTmpKey);
+    }
+
+    return res.status(200).json({ category });
+  } catch {
+    try {
+      if (finalKey) await deleteObject(finalKey);
+    } catch {
+      // best-effort cleanup
+    }
+    if (tmpKeyToCleanup) {
+      try {
+        await deleteObject(tmpKeyToCleanup);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    for (const key of bannerFinalKeys) {
+      try {
+        await deleteObject(key);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    for (const key of bannerTmpKeysToCleanup) {
+      try {
+        await deleteObject(key);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.delete("/categories/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const id = getSingleParamValue(req.params.id);
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const hasSubcategories = await Subcategory.exists({ categoryId: id });
+    if (hasSubcategories) {
+      return res.status(409).json({ error: "Cannot delete category with subcategories" });
+    }
+    const hasProfiles = await SubcategoryProfile.exists({ categoryId: id });
+    if (hasProfiles) {
+      return res.status(409).json({ error: "Cannot delete category with subcategory profiles" });
+    }
+
+    const deleted = await Category.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ error: "Category not found" });
+
+    return res.status(200).json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 router.get("/subcategory-profiles", requireAuth, requireRole("admin"), async (req, res) => {
   try {
     const categoryId = asTrimmedString(req.query.categoryId);
@@ -187,6 +316,55 @@ router.post("/subcategory-profiles", requireAuth, requireRole("admin"), async (r
     });
 
     return res.status(201).json({ subcategoryProfile });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.put("/subcategory-profiles/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const id = getSingleParamValue(req.params.id);
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const body = req.body as {
+      name?: string;
+      displayOrder?: number;
+      isActive?: boolean;
+    };
+
+    const profile = await SubcategoryProfile.findById(id);
+    if (!profile) return res.status(404).json({ error: "Subcategory profile not found" });
+
+    const name = asTrimmedString(body.name);
+    if (typeof name === "string") profile.name = name;
+    if (Number.isFinite(body.displayOrder)) profile.displayOrder = Number(body.displayOrder);
+    if (typeof body.isActive === "boolean") profile.isActive = body.isActive;
+
+    await profile.save();
+    return res.status(200).json({ subcategoryProfile: profile });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.delete("/subcategory-profiles/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const id = getSingleParamValue(req.params.id);
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+
+    const hasSubcategories = await Subcategory.exists({ subcategoryProfileId: id });
+    if (hasSubcategories) {
+      return res.status(409).json({ error: "Cannot delete subcategory profile with subcategories" });
+    }
+
+    const deleted = await SubcategoryProfile.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ error: "Subcategory profile not found" });
+
+    return res.status(200).json({ ok: true });
   } catch {
     return res.status(500).json({ error: "Server error" });
   }

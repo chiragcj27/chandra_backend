@@ -3,10 +3,28 @@ import mongoose from "mongoose";
 
 import { Category } from "../models/Category";
 import { Product } from "../models/Product";
-import { Subcategory } from "../models/Subcategory";
+import { Subcategory, type FilterField } from "../models/Subcategory";
 import { SubcategoryProfile } from "../models/SubcategoryProfile";
 
 const router = Router();
+
+/** Profile groups in /categories/:id/subcategory-profiles; legacy bucket uses a string _id sentinel. */
+type SubcategoryProfileGroup = {
+  _id: mongoose.Types.ObjectId | string;
+  name: string;
+  subcategories: Array<{
+    _id: mongoose.Types.ObjectId;
+    name: string;
+    imageUrl: string;
+    thumbnailImage: string;
+    images: string[];
+    description: string;
+    subtext: string;
+    designCount: number;
+    infoText: string;
+    filterSchema: FilterField[];
+  }>;
+};
 
 /** Public endpoint – returns only active categories ordered by displayOrder. */
 router.get("/categories", async (_req, res) => {
@@ -31,7 +49,8 @@ router.get("/categories", async (_req, res) => {
 
 /**
  * Public endpoint – returns subcategory profiles for a category, with their subcategories.
- * Used by the mobile app category page to render profile sections.
+ * It also includes legacy subcategories (without a profile) as a separate section.
+ * Used by the mobile app category page to render all available subcategory groups.
  */
 router.get("/categories/:categoryId/subcategory-profiles", async (req, res) => {
   try {
@@ -50,67 +69,61 @@ router.get("/categories/:categoryId/subcategory-profiles", async (req, res) => {
       createdAt: -1,
     });
 
-    // Legacy fallback: if a category has no profiles, surface subcategories
-    // directly under the category name so the app still renders cards.
-    if (profiles.length === 0) {
-      const subcategories = await Subcategory.find({
-        categoryId,
-        isActive: true,
-      }).sort({ displayOrder: 1, createdAt: -1 });
-
-      const legacyPayload = [
-        {
-          _id: `legacy-${category._id.toString()}`,
-          name: category.name,
-          subcategories: subcategories.map((s) => ({
-            _id: s._id,
-            name: s.name,
-            imageUrl: s.thumbnailImage ?? "",
-            thumbnailImage: s.thumbnailImage ?? "",
-            images: s.images ?? [],
-            description: s.description ?? "",
-            subtext: s.subtext ?? "",
-            designCount: s.productCount ?? 0,
-            infoText: s.infoText ?? "",
-            filterSchema: s.filterSchema ?? [],
-          })),
-        },
-      ];
-
-      return res.status(200).json({ subcategoryProfiles: legacyPayload });
-    }
-
     const subcategories = await Subcategory.find({
       categoryId,
       isActive: true,
-      subcategoryProfileId: { $in: profiles.map((p) => p._id) },
     }).sort({ displayOrder: 1, createdAt: -1 });
 
     const byProfileId = new Map<string, typeof subcategories>();
+    const legacySubcategories: typeof subcategories = [];
     for (const s of subcategories) {
       const pid = s.subcategoryProfileId?.toString();
-      if (!pid) continue;
+      if (!pid) {
+        legacySubcategories.push(s);
+        continue;
+      }
       const existing = byProfileId.get(pid);
       if (existing) existing.push(s);
       else byProfileId.set(pid, [s]);
     }
 
-    const payload = profiles.map((p) => ({
-      _id: p._id,
-      name: p.name,
-      subcategories: (byProfileId.get(p._id.toString()) ?? []).map((s) => ({
-        _id: s._id,
-        name: s.name,
-        imageUrl: s.thumbnailImage ?? "",
-        thumbnailImage: s.thumbnailImage ?? "",
-        images: s.images ?? [],
-        description: s.description ?? "",
-        subtext: s.subtext ?? "",
-        designCount: s.productCount ?? 0,
-        infoText: s.infoText ?? "",
-        filterSchema: s.filterSchema ?? [],
-      })),
-    }));
+    const payload: SubcategoryProfileGroup[] = profiles
+      .map((p) => ({
+        _id: p._id,
+        name: p.name,
+        subcategories: (byProfileId.get(p._id.toString()) ?? []).map((s) => ({
+          _id: s._id,
+          name: s.name,
+          imageUrl: s.thumbnailImage ?? "",
+          thumbnailImage: s.thumbnailImage ?? "",
+          images: s.images ?? [],
+          description: s.description ?? "",
+          subtext: s.subtext ?? "",
+          designCount: s.productCount ?? 0,
+          infoText: s.infoText ?? "",
+          filterSchema: s.filterSchema ?? [],
+        })),
+      }))
+      .filter((profile) => profile.subcategories.length > 0);
+
+    if (legacySubcategories.length > 0) {
+      payload.push({
+        _id: `legacy-${category._id.toString()}`,
+        name: category.name,
+        subcategories: legacySubcategories.map((s) => ({
+          _id: s._id,
+          name: s.name,
+          imageUrl: s.thumbnailImage ?? "",
+          thumbnailImage: s.thumbnailImage ?? "",
+          images: s.images ?? [],
+          description: s.description ?? "",
+          subtext: s.subtext ?? "",
+          designCount: s.productCount ?? 0,
+          infoText: s.infoText ?? "",
+          filterSchema: s.filterSchema ?? [],
+        })),
+      });
+    }
 
     return res.status(200).json({ subcategoryProfiles: payload });
   } catch {
