@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 
 import { Category } from "../models/Category";
 import { Product } from "../models/Product";
+import { StoneShape } from "../models/StoneShape";
 import { Subcategory, type FilterField } from "../models/Subcategory";
 import { SubcategoryProfile } from "../models/SubcategoryProfile";
 
@@ -146,6 +147,17 @@ router.get("/subcategories/:subcategoryId/products", async (req, res) => {
       );
 
     return res.status(200).json({ products });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.get("/stone-shapes", async (_req, res) => {
+  try {
+    const stoneShapes = await StoneShape.find({ isActive: true })
+      .sort({ displayOrder: 1, createdAt: -1 })
+      .select("_id name thumbnailImage");
+    return res.status(200).json({ stoneShapes });
   } catch {
     return res.status(500).json({ error: "Server error" });
   }

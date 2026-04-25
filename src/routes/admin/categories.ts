@@ -6,10 +6,12 @@ import multer from "multer";
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import { Category } from "../../models/Category";
 import { Product } from "../../models/Product";
+import { StoneShape } from "../../models/StoneShape";
 import { Subcategory } from "../../models/Subcategory";
 import { SubcategoryProfile } from "../../models/SubcategoryProfile";
 import {
   bulkProductGroupToAdminInput,
+  buildRingFilterSchema,
   cellToString,
   createAdminProduct,
   groupBulkRowsIntoStyleGroups,
@@ -38,10 +40,115 @@ function getSingleParamValue(value: string | string[] | undefined): string | und
   return undefined;
 }
 
+async function normalizeFilterPayloadForRingCategory(
+  categoryId: string,
+  inputFilter: unknown[],
+): Promise<Array<{ filterName: string; filterValue: string | string[] }>> {
+  const category = await Category.findById(categoryId).select("name").lean();
+  const isRingCategory = String(category?.name ?? "").toLowerCase().includes("ring");
+  if (!isRingCategory) {
+    return inputFilter as Array<{ filterName: string; filterValue: string | string[] }>;
+  }
+
+  const normalized = (inputFilter as Array<{ filterName: string; filterValue: string | string[] }>).map(
+    (entry) => {
+      const filterNameRaw = String(entry?.filterName ?? "").trim();
+      const normalizedName = filterNameRaw.toLowerCase().replace(/\s+/g, "");
+      if (normalizedName === "stoneshape") {
+        return { ...entry, filterName: "stoneShape" };
+      }
+      return entry;
+    },
+  );
+  return normalized;
+}
+
 router.get("/categories", requireAuth, requireRole("admin"), async (_req, res) => {
   try {
     const categories = await Category.find().sort({ displayOrder: 1, createdAt: -1 });
     return res.status(200).json({ categories });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.get("/stone-shapes", requireAuth, requireRole("admin"), async (_req, res) => {
+  try {
+    const stoneShapes = await StoneShape.find().sort({ displayOrder: 1, createdAt: -1 });
+    return res.status(200).json({ stoneShapes });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.post("/stone-shapes", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const body = req.body as {
+      name?: string;
+      thumbnailImage?: string;
+      displayOrder?: number;
+      isActive?: boolean;
+    };
+    const name = asTrimmedString(body.name);
+    const thumbnailImage = asTrimmedString(body.thumbnailImage);
+    const displayOrder = Number.isFinite(body.displayOrder) ? Number(body.displayOrder) : 0;
+    const isActive = typeof body.isActive === "boolean" ? body.isActive : true;
+    if (!name || !thumbnailImage) {
+      return res.status(400).json({ error: "name and thumbnailImage are required" });
+    }
+    const stoneShape = await StoneShape.create({ name, thumbnailImage, displayOrder, isActive });
+    return res.status(201).json({ stoneShape });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message.toLowerCase() : "";
+    if (message.includes("duplicate key")) {
+      return res.status(409).json({ error: "Stone shape name already exists" });
+    }
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.put("/stone-shapes/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const id = getSingleParamValue(req.params.id);
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+    const stoneShape = await StoneShape.findById(id);
+    if (!stoneShape) return res.status(404).json({ error: "Stone shape not found" });
+
+    const body = req.body as {
+      name?: string;
+      thumbnailImage?: string;
+      displayOrder?: number;
+      isActive?: boolean;
+    };
+    const name = asTrimmedString(body.name);
+    const thumbnailImage = asTrimmedString(body.thumbnailImage);
+    if (typeof name === "string") stoneShape.name = name;
+    if (typeof thumbnailImage === "string") stoneShape.thumbnailImage = thumbnailImage;
+    if (Number.isFinite(body.displayOrder)) stoneShape.displayOrder = Number(body.displayOrder);
+    if (typeof body.isActive === "boolean") stoneShape.isActive = body.isActive;
+
+    await stoneShape.save();
+    return res.status(200).json({ stoneShape });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message.toLowerCase() : "";
+    if (message.includes("duplicate key")) {
+      return res.status(409).json({ error: "Stone shape name already exists" });
+    }
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.delete("/stone-shapes/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const id = getSingleParamValue(req.params.id);
+    if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid id" });
+    }
+    const deleted = await StoneShape.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ error: "Stone shape not found" });
+    return res.status(200).json({ ok: true });
   } catch {
     return res.status(500).json({ error: "Server error" });
   }
@@ -743,6 +850,7 @@ router.post("/products", requireAuth, requireRole("admin"), async (req, res) => 
     if (!parsed) {
       return res.status(400).json({ error: "styleNo, categoryId, and subcategoryId are required" });
     }
+    parsed.filter = await normalizeFilterPayloadForRingCategory(parsed.categoryId, parsed.filter ?? []);
     const result = await createAdminProduct(parsed);
     if (!result.ok) {
       return res.status(result.status).json({ error: result.error });
@@ -795,7 +903,11 @@ router.post(
         }
 
         const sub = await Subcategory.findById(resolved.subcategoryId).select("filterSchema").lean();
-        const built = bulkProductGroupToAdminInput(group, resolved, sub?.filterSchema ?? []);
+        const runtimeFilterSchema = await buildRingFilterSchema(
+          sub?.filterSchema ?? [],
+          resolved.categoryId,
+        );
+        const built = bulkProductGroupToAdminInput(group, resolved, runtimeFilterSchema);
         if (!built.ok) {
           errors.push({
             row: group.excelStartRow,
@@ -804,6 +916,11 @@ router.post(
           });
           continue;
         }
+
+        built.input.filter = await normalizeFilterPayloadForRingCategory(
+          resolved.categoryId,
+          built.input.filter ?? [],
+        );
 
         const result = await createAdminProduct(built.input);
         if (!result.ok) {
@@ -911,7 +1028,7 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
       silver: parseMetalWeightEntry(rawMetalWeights.silver, "Silver"),
       platinum: parseMetalWeightEntry(rawMetalWeights.platinum, "Platinum"),
     };
-    const filter = Array.isArray(body.filter)
+    const parsedFilter = Array.isArray(body.filter)
       ? body.filter
           .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null)
           .map((entry) => {
@@ -1001,7 +1118,7 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
     existing.isActive = isActive;
     existing.isBestSeller = isBestSeller;
     existing.isReadyToShip = isReadyToShip;
-    existing.filter = filter;
+    existing.filter = await normalizeFilterPayloadForRingCategory(categoryId, parsedFilter);
     await existing.save();
 
     if (previousCategoryId !== categoryId) {

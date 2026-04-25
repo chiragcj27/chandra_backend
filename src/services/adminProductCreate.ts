@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 
 import { Category } from "../models/Category";
 import { Product } from "../models/Product";
+import { StoneShape } from "../models/StoneShape";
 import { Subcategory, type FilterField } from "../models/Subcategory";
 import { SubcategoryProfile } from "../models/SubcategoryProfile";
 import type { Diamond, MetalWeights, ProductDocument, ProductFilterValue } from "../models/Product";
@@ -15,6 +16,39 @@ function asTrimmedString(x: unknown): string | undefined {
 
 function normalizeDisplayName(s: string): string {
   return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+const STONE_SHAPE_FILTER_KEY = "stoneShape";
+const STONE_SHAPE_FILTER_LABEL = "Stone Shape";
+
+export async function buildRingFilterSchema(filterSchema: FilterField[], categoryId: string): Promise<FilterField[]> {
+  const category = await Category.findById(categoryId).select("name").lean();
+  const isRingCategory = String(category?.name ?? "").toLowerCase().includes("ring");
+  if (!isRingCategory) return filterSchema;
+
+  const stoneShapes = await StoneShape.find({ isActive: true })
+    .sort({ displayOrder: 1, createdAt: -1 })
+    .select("name")
+    .lean();
+  if (!stoneShapes.length) return filterSchema;
+
+  const hasStoneShapeFilter = filterSchema.some(
+    (field) =>
+      normalizeDisplayName(field.key) === normalizeDisplayName(STONE_SHAPE_FILTER_KEY) ||
+      normalizeDisplayName(field.label) === normalizeDisplayName(STONE_SHAPE_FILTER_LABEL),
+  );
+  if (hasStoneShapeFilter) return filterSchema;
+
+  return [
+    ...filterSchema,
+    {
+      key: STONE_SHAPE_FILTER_KEY,
+      label: STONE_SHAPE_FILTER_LABEL,
+      type: "chips",
+      displayOrder: -3,
+      options: stoneShapes.map((shape) => ({ label: shape.name, value: shape.name })),
+    },
+  ];
 }
 
 /**
