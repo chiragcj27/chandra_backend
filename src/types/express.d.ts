@@ -6,6 +6,8 @@ declare module "express-serve-static-core" {
       id: string;
       role: "admin" | "client";
       username?: string;
+      clientName?: string;
+      email?: string;
     };
   }
 }

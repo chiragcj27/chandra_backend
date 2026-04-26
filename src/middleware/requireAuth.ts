@@ -13,7 +13,13 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 
   try {
     const payload = verifyAccessToken(token);
-    req.user = { id: payload.sub, role: payload.role, username: payload.username };
+    req.user = {
+      id: payload.sub,
+      role: payload.role,
+      username: payload.username,
+      clientName: payload.clientName,
+      email: payload.email,
+    };
     return next();
   } catch {
     return res.status(401).json({ error: "Unauthorized" });

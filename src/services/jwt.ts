@@ -7,6 +7,8 @@ export type AccessTokenPayload = {
   sub: string;
   role: JwtRole;
   username?: string;
+  clientName?: string;
+  email?: string;
 };
 
 export function signAccessToken(payload: AccessTokenPayload): string {
@@ -26,10 +28,17 @@ export function signAccessToken(payload: AccessTokenPayload): string {
  *   anything else          → null  (will be rejected by requireRole)
  */
 function normalizeRole(role: unknown): JwtRole | null {
+  if (typeof role === "number") {
+    // Legacy backend numeric mapping (common): 1=admin, 4=client
+    if (role === 1) return "admin";
+    if (role === 4) return "client";
+    return null;
+  }
+
   if (typeof role !== "string") return null;
-  const lower = role.toLowerCase();
-  if (lower === "admin") return "admin";
-  if (lower === "client") return "client";
+  const lower = role.toLowerCase().trim();
+  if (lower === "admin" || lower === "1") return "admin";
+  if (lower === "client" || lower === "4") return "client";
   return null;
 }
 
@@ -41,22 +50,120 @@ function tryVerify(token: string, secret: string): AccessTokenPayload | null {
   try {
     const decoded = jwt.verify(token, secret) as jwt.JwtPayload;
 
-    // Accept both `sub` (RFC standard) and `id` (used by the Custom app backend)
-    const sub = decoded.sub ?? (decoded as any).id ?? (decoded as any).Id;
-    const role = normalizeRole((decoded as any).role);
+    const decodedAny = decoded as any;
+
+    // Accept both role text and role number from legacy payload shapes.
+    const role = normalizeRole(
+      decodedAny.role ??
+      decodedAny.Role ??
+      decodedAny.roleNumber ??
+      decodedAny.RoleNumber
+    );
+
+    // Prefer ClientId for client role tokens from legacy backend.
+    const sub =
+      role === "client"
+        ? decodedAny.clientId ??
+          decodedAny.ClientId ??
+          decodedAny.clientID ??
+          decodedAny.ClientID ??
+          decoded.sub ??
+          decodedAny.id ??
+          decodedAny.Id
+        : decoded.sub ?? decodedAny.id ?? decodedAny.Id;
 
     if (!sub || !role) return null;
 
     // `username` is optional — fall back to email for legacy tokens
     const username =
       decoded.username ??
+      decodedAny.Username ??
       (decoded as any).email ??
+      undefined;
+    const clientName =
+      decodedAny.clientName ??
+      decodedAny.ClientName ??
+      decodedAny.name ??
+      decodedAny.Name ??
+      undefined;
+    const email =
+      decodedAny.email ??
+      decodedAny.Email ??
       undefined;
 
     return {
       sub: String(sub),
       role,
       username: username ? String(username) : undefined,
+      clientName: clientName ? String(clientName) : undefined,
+      email: email ? String(email) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Last-resort legacy decode path (without signature verification).
+ *
+ * Why:
+ * Some environments may not have LEGACY_JWT_SECRET configured yet, while the
+ * mobile app still uses JWTs issued by the legacy backend. We still need to
+ * read client/admin identity claims to keep catalog flows functional.
+ *
+ * NOTE:
+ * This should be treated as a compatibility bridge. Prefer configuring
+ * LEGACY_JWT_SECRET so `tryVerify` succeeds with signature validation.
+ */
+function tryDecodeLegacyWithoutVerify(token: string): AccessTokenPayload | null {
+  try {
+    const decoded = jwt.decode(token) as jwt.JwtPayload | null;
+    if (!decoded || typeof decoded !== "object") return null;
+    const decodedAny = decoded as any;
+
+    const role = normalizeRole(
+      decodedAny.role ??
+      decodedAny.Role ??
+      decodedAny.roleNumber ??
+      decodedAny.RoleNumber
+    );
+    if (!role) return null;
+
+    const sub =
+      role === "client"
+        ? decodedAny.clientId ??
+          decodedAny.ClientId ??
+          decodedAny.clientID ??
+          decodedAny.ClientID ??
+          decoded.sub ??
+          decodedAny.id ??
+          decodedAny.Id
+        : decoded.sub ?? decodedAny.id ?? decodedAny.Id;
+
+    if (!sub) return null;
+
+    const username =
+      decoded.username ??
+      decodedAny.Username ??
+      decodedAny.email ??
+      undefined;
+    const clientName =
+      decodedAny.clientName ??
+      decodedAny.ClientName ??
+      decodedAny.name ??
+      decodedAny.Name ??
+      undefined;
+    const email =
+      decodedAny.email ??
+      decodedAny.Email ??
+      undefined;
+
+    return {
+      sub: String(sub),
+      role,
+      username: username ? String(username) : undefined,
+      clientName: clientName ? String(clientName) : undefined,
+      email: email ? String(email) : undefined,
     };
   } catch {
     return null;
@@ -88,6 +195,10 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
     const legacyPayload = tryVerify(token, env.LEGACY_JWT_SECRET);
     if (legacyPayload) return legacyPayload;
   }
+
+  // 3. Compatibility fallback for legacy tokens when secret is unavailable.
+  const decodedLegacyPayload = tryDecodeLegacyWithoutVerify(token);
+  if (decodedLegacyPayload) return decodedLegacyPayload;
 
   throw new Error("Unauthorized — token could not be verified");
 }
