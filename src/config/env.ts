@@ -21,6 +21,15 @@ export const env = {
    * If omitted, only tokens signed by this backend's own JWT_SECRET are accepted.
    */
   LEGACY_JWT_SECRET: process.env.LEGACY_JWT_SECRET || undefined,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY || undefined,
+  DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY || undefined,
+  BULK_ORDER_OPENAI_MODEL: process.env.BULK_ORDER_OPENAI_MODEL || "gpt-4.1-mini",
+  BULK_ORDER_PARSE_TIMEOUT_MS: process.env.BULK_ORDER_PARSE_TIMEOUT_MS
+    ? Number(process.env.BULK_ORDER_PARSE_TIMEOUT_MS)
+    : 15000,
+  BULK_ORDER_DEEPGRAM_TIMEOUT_MS: process.env.BULK_ORDER_DEEPGRAM_TIMEOUT_MS
+    ? Number(process.env.BULK_ORDER_DEEPGRAM_TIMEOUT_MS)
+    : 20000,
   PASSWORD_SEED: required("PASSWORD_SEED"),
   ADMIN_EMAIL: process.env.ADMIN_EMAIL,
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,

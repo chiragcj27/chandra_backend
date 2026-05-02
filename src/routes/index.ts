@@ -7,6 +7,7 @@ import bannersRouter from "./banners";
 import categoriesRouter from "./categories";
 import clientsRouter from "./clients";
 import ordersRouter from "./orders";
+import bulkOrderParserRouter from "./bulkOrderParser";
 
 const routes = Router();
 
@@ -17,6 +18,7 @@ routes.use(bannersRouter);
 routes.use(categoriesRouter);
 routes.use(clientsRouter);
 routes.use(ordersRouter);
+routes.use(bulkOrderParserRouter);
 
 export default routes;
 
