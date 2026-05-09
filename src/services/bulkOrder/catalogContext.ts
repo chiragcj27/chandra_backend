@@ -2,6 +2,11 @@ import { Category } from "../../models/Category";
 import { Subcategory } from "../../models/Subcategory";
 import { SubcategoryProfile } from "../../models/SubcategoryProfile";
 
+const CATALOG_CONTEXT_CACHE_TTL_MS = 2 * 60 * 1000;
+let cachedCatalogContext: { categories: BulkOrderCatalogCategory[] } | null = null;
+let catalogContextCachedAt = 0;
+let catalogContextInFlight: Promise<{ categories: BulkOrderCatalogCategory[] }> | null = null;
+
 export type BulkOrderCatalogFilter = {
   name: string;
   type: "chips" | "multi_chips" | "dropdown";
@@ -33,7 +38,7 @@ export function normalizeToken(value: unknown): string {
     .replace(/[^a-z0-9]/g, "");
 }
 
-export async function buildBulkOrderCatalogContext(): Promise<{ categories: BulkOrderCatalogCategory[] }> {
+async function fetchBulkOrderCatalogContext(): Promise<{ categories: BulkOrderCatalogCategory[] }> {
   const startedAt = Date.now();
   console.log("[BulkOrderCatalogContext] building context");
   const [categories, profiles, subcategories] = await Promise.all([
@@ -104,4 +109,27 @@ export async function buildBulkOrderCatalogContext(): Promise<{ categories: Bulk
     elapsedMs: Date.now() - startedAt,
   });
   return { categories: filtered };
+}
+
+export async function buildBulkOrderCatalogContext(): Promise<{ categories: BulkOrderCatalogCategory[] }> {
+  const age = Date.now() - catalogContextCachedAt;
+  if (cachedCatalogContext && age < CATALOG_CONTEXT_CACHE_TTL_MS) {
+    return cachedCatalogContext;
+  }
+
+  if (catalogContextInFlight) {
+    return catalogContextInFlight;
+  }
+
+  catalogContextInFlight = fetchBulkOrderCatalogContext()
+    .then((context) => {
+      cachedCatalogContext = context;
+      catalogContextCachedAt = Date.now();
+      return context;
+    })
+    .finally(() => {
+      catalogContextInFlight = null;
+    });
+
+  return catalogContextInFlight;
 }

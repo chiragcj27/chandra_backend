@@ -4,6 +4,36 @@ import type { BulkOrderCatalogCategory } from "./catalogContext";
 import { normalizeToken } from "./catalogContext";
 import { canonicalBulkOrderStoneType, type ParsedBulkOrderLine } from "./llmParser";
 
+const SUBCATEGORY_CACHE_TTL_MS = 2 * 60 * 1000;
+const PRODUCTS_CACHE_TTL_MS = 60 * 1000;
+
+type SubcategoryMeta = {
+  thumbnailImage?: string;
+  description?: string;
+  subtext?: string;
+  specialNotePlaceholderText?: string;
+} | null;
+
+type ProductMatchCandidate = {
+  _id: unknown;
+  styleNo?: string;
+  description?: string;
+  images?: unknown[];
+  pointer?: number;
+  totalDiamondWeightCt?: number;
+  filter?: unknown;
+  metalWeights?: unknown;
+  diamonds?: unknown[];
+  price?: number;
+  sellingPrice?: number;
+  mrp?: number;
+};
+
+const subcategoryCache = new Map<string, { expiresAt: number; value: SubcategoryMeta }>();
+const subcategoryInFlight = new Map<string, Promise<SubcategoryMeta>>();
+const productsCache = new Map<string, { expiresAt: number; value: ProductMatchCandidate[] }>();
+const productsInFlight = new Map<string, Promise<ProductMatchCandidate[]>>();
+
 type OptionValue = { label: string; value: string };
 type MissingField = { field: string; label: string; options: OptionValue[] };
 
@@ -136,6 +166,63 @@ function scoreProductMatch(args: {
   return Number.MAX_SAFE_INTEGER / 2;
 }
 
+async function getSubcategoryMetaCached(subcategoryId: string) {
+  const now = Date.now();
+  const cached = subcategoryCache.get(subcategoryId);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const pending = subcategoryInFlight.get(subcategoryId);
+  if (pending) return pending;
+
+  const request = Subcategory.findById(subcategoryId)
+    .select("thumbnailImage description subtext specialNotePlaceholderText")
+    .lean()
+    .catch(() => null)
+    .then((doc) => {
+      subcategoryCache.set(subcategoryId, {
+        value: doc,
+        expiresAt: Date.now() + SUBCATEGORY_CACHE_TTL_MS,
+      });
+      return doc;
+    })
+    .finally(() => {
+      subcategoryInFlight.delete(subcategoryId);
+    });
+
+  subcategoryInFlight.set(subcategoryId, request);
+  return request;
+}
+
+async function getProductsForSubcategoryCached(subcategoryId: string) {
+  const now = Date.now();
+  const cached = productsCache.get(subcategoryId);
+  if (cached && cached.expiresAt > now) return cached.value;
+
+  const pending = productsInFlight.get(subcategoryId);
+  if (pending) return pending;
+
+  const request = Product.find({ subcategoryId, isActive: true })
+    .select(
+      "_id styleNo description images pointer totalDiamondWeightCt filter metalWeights diamonds price sellingPrice mrp"
+    )
+    .sort({ displayOrder: 1, createdAt: -1 })
+    .limit(100)
+    .lean()
+    .then((docs) => {
+      productsCache.set(subcategoryId, {
+        value: docs,
+        expiresAt: Date.now() + PRODUCTS_CACHE_TTL_MS,
+      });
+      return docs;
+    })
+    .finally(() => {
+      productsInFlight.delete(subcategoryId);
+    });
+
+  productsInFlight.set(subcategoryId, request);
+  return request;
+}
+
 export async function resolveAndMatchBulkOrder(args: {
   parsedLines: ParsedBulkOrderLine[];
   overrides?: Record<string, Record<string, unknown>>;
@@ -245,18 +332,9 @@ export async function resolveAndMatchBulkOrder(args: {
 
     let matchedProduct: ResolvedLine["matchedProduct"] | undefined;
     if (subcategory && missingFields.length === 0) {
-      const subcategoryDoc = await Subcategory.findById(subcategory.id)
-        .select("thumbnailImage description subtext specialNotePlaceholderText")
-        .lean()
-        .catch(() => null);
+      const subcategoryDoc = await getSubcategoryMetaCached(subcategory.id);
       const parsedTarget = parseCaratOrPointer(line.caratOrPointer);
-      const products = await Product.find({ subcategoryId: subcategory.id, isActive: true })
-        .select(
-          "_id styleNo description images pointer totalDiamondWeightCt filter metalWeights diamonds price sellingPrice mrp"
-        )
-        .sort({ displayOrder: 1, createdAt: -1 })
-        .limit(100)
-        .lean();
+      const products = await getProductsForSubcategoryCached(subcategory.id);
       const product = [...products].sort((a, b) => {
         const scoreA = scoreProductMatch({
           targetPointer: parsedTarget.pointer,
