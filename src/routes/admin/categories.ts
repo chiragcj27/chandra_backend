@@ -950,6 +950,7 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
 
     const body = req.body as {
       styleNo?: string;
+      name?: string;
       categoryId?: string;
       subcategoryProfileId?: string;
       subcategoryId?: string;
@@ -963,6 +964,8 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
       metalWeights?: Record<string, unknown>;
       embedding?: unknown[];
       images?: unknown[];
+      displayImage?: string;
+      secondaryImage?: string;
       displayOrder?: number;
       isActive?: boolean;
       isBestSeller?: boolean;
@@ -971,6 +974,7 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
     };
 
     const styleNo = asTrimmedString(body.styleNo);
+    const name = asTrimmedString(body.name);
     const categoryId = asTrimmedString(body.categoryId);
     const subcategoryProfileId = asTrimmedString(body.subcategoryProfileId);
     const subcategoryId = asTrimmedString(body.subcategoryId);
@@ -986,6 +990,8 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
     const isActive = typeof body.isActive === "boolean" ? body.isActive : true;
     const isBestSeller = typeof body.isBestSeller === "boolean" ? body.isBestSeller : false;
     const isReadyToShip = typeof body.isReadyToShip === "boolean" ? body.isReadyToShip : false;
+    const displayImage = asTrimmedString(body.displayImage);
+    const secondaryImage = asTrimmedString(body.secondaryImage);
     const images = Array.isArray(body.images)
       ? body.images
           .map((image) => asTrimmedString(image))
@@ -1098,7 +1104,8 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
     const previousCategoryId = String(existing.categoryId);
     const previousSubcategoryId = String(existing.subcategoryId);
 
-    existing.styleNo = styleNo;
+    if (styleNo !== undefined) existing.styleNo = styleNo;
+    if (name !== undefined) existing.name = name;
     existing.categoryId = new mongoose.Types.ObjectId(categoryId);
     existing.subcategoryProfileId = subcategoryProfileId
       ? new mongoose.Types.ObjectId(subcategoryProfileId)
@@ -1113,6 +1120,8 @@ router.put("/products/:id", requireAuth, requireRole("admin"), async (req, res) 
     existing.pointer = pointer;
     existing.metalWeights = metalWeights;
     existing.images = images;
+    existing.displayImage = displayImage;
+    existing.secondaryImage = secondaryImage;
     existing.embedding = embedding;
     existing.displayOrder = displayOrder;
     existing.isActive = isActive;

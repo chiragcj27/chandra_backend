@@ -1,0 +1,257 @@
+import { Router } from "express";
+import { Category } from "../models/Category";
+import { Subcategory } from "../models/Subcategory";
+import { SubcategoryProfile } from "../models/SubcategoryProfile";
+import { Product } from "../models/Product";
+
+const router = Router();
+
+/** Escapes special regex characters so raw user input is safe to query. */
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Splits a query into individual words and builds a Mongoose filter that
+ * requires EVERY word to appear in at least one of the given fields.
+ *
+ * This makes word order irrelevant:
+ *   "necklace low profile"  →  matches "Low Profile Necklace"  ✓
+ *   "low profile necklace"  →  same result                      ✓
+ */
+function buildWordQuery(
+  fields: string[],
+  words: string[]
+): Record<string, unknown> {
+  const conditions = words.map((word) => {
+    const re = new RegExp(escapeRegex(word), "i");
+    // Single field — no $or wrapper needed
+    if (fields.length === 1) return { [fields[0]]: re };
+    // Multiple fields — word can appear in any one of them
+    return { $or: fields.map((f) => ({ [f]: re })) };
+  });
+  return conditions.length === 1 ? conditions[0] : { $and: conditions };
+}
+
+/** Splits raw input into non-empty words. */
+function parseWords(q: string): string[] {
+  return q.trim().split(/\s+/).filter((w) => w.length > 0);
+}
+
+const RESULTS_PER_TYPE = 8;
+
+/**
+ * GET /search?q=<query>
+ *
+ * Searches across Categories, SubcategoryProfiles, Subcategories, and Products.
+ * Returns up to RESULTS_PER_TYPE matches per type.
+ *
+ * Response shape:
+ * {
+ *   categories:         CategoryResult[],
+ *   subcategoryProfiles: ProfileResult[],
+ *   subcategories:      SubcategoryResult[],
+ *   products:           ProductResult[],
+ * }
+ */
+router.get("/search", async (req, res) => {
+  try {
+    const raw = String(req.query.q ?? "").trim();
+
+    if (raw.length < 2) {
+      return res.status(200).json({
+        categories: [],
+        subcategoryProfiles: [],
+        subcategories: [],
+        products: [],
+      });
+    }
+
+    const words = parseWords(raw);
+
+    // ── 1. Parallel first-pass queries (no populate needed yet) ─────────────
+    const [categoryDocs, profileDocs, subcategoryDocs, productDocs] = await Promise.all([
+      // Categories: every word must appear in name (order-independent)
+      Category.find({ isActive: true, ...buildWordQuery(["name"], words) })
+        .sort({ displayOrder: 1, createdAt: -1 })
+        .limit(RESULTS_PER_TYPE)
+        .select("_id name thumbnailImage categoryBannerImages productCount"),
+
+      // SubcategoryProfiles: every word must appear in name
+      SubcategoryProfile.find({ isActive: true, ...buildWordQuery(["name"], words) })
+        .sort({ displayOrder: 1, createdAt: -1 })
+        .limit(RESULTS_PER_TYPE)
+        .select("_id name categoryId"),
+
+      // Subcategories: every word must appear in name, subtext, OR description
+      // Each word is independently matched across the three fields.
+      Subcategory.find({
+        isActive: true,
+        ...buildWordQuery(["name", "subtext", "description"], words),
+      })
+        .sort({ displayOrder: 1, createdAt: -1 })
+        .limit(RESULTS_PER_TYPE)
+        .select(
+          "_id name thumbnailImage images categoryId subcategoryProfileId " +
+          "subtext description infoText filterSchema productCount specialNotePlaceholderText"
+        ),
+
+      // Products: every word must appear in styleNo OR name
+      Product.find({
+        isActive: true,
+        ...buildWordQuery(["styleNo", "name"], words),
+      })
+        .sort({ displayOrder: 1, createdAt: -1 })
+        .limit(RESULTS_PER_TYPE)
+        .select(
+          "_id styleNo name displayImage images pointer " +
+          "subcategoryId subcategoryProfileId categoryId"
+        ),
+    ]);
+
+    // ── 2. Collect IDs needed for enrichment ────────────────────────────────
+    const profileCategoryIds = [...new Set(profileDocs.map((p) => p.categoryId.toString()))];
+
+    const subcatCategoryIds = [...new Set(subcategoryDocs.map((s) => s.categoryId.toString()))];
+    const subcatProfileIds = subcategoryDocs
+      .filter((s) => s.subcategoryProfileId)
+      .map((s) => s.subcategoryProfileId!.toString());
+
+    const productSubcategoryIds = [...new Set(productDocs.map((p) => p.subcategoryId.toString()))];
+    const productCategoryIds    = [...new Set(productDocs.map((p) => p.categoryId.toString()))];
+    const productProfileIds     = productDocs
+      .filter((p) => p.subcategoryProfileId)
+      .map((p) => p.subcategoryProfileId!.toString());
+
+    // ── 3. Parallel enrichment lookups ──────────────────────────────────────
+    const [
+      profileCategoryDocs,
+      subcatCategoryDocs,
+      subcatProfileDocs,
+      productSubcategoryDocs,
+      productCategoryDocs,
+      productProfileDocs,
+    ] = await Promise.all([
+      // For profiles → need parent category (name + image + banners)
+      Category.find({ _id: { $in: profileCategoryIds } }).select(
+        "_id name thumbnailImage categoryBannerImages"
+      ),
+
+      // For subcategories → need parent category name
+      Category.find({ _id: { $in: subcatCategoryIds } }).select("_id name"),
+
+      // For subcategories → need parent profile name
+      SubcategoryProfile.find({ _id: { $in: subcatProfileIds } }).select("_id name"),
+
+      // For products → need full subcategory for nav params
+      Subcategory.find({ _id: { $in: productSubcategoryIds } }).select(
+        "_id name thumbnailImage images filterSchema description subtext infoText specialNotePlaceholderText"
+      ),
+
+      // For products → need category name
+      Category.find({ _id: { $in: productCategoryIds } }).select("_id name"),
+
+      // For products → need profile name
+      SubcategoryProfile.find({ _id: { $in: productProfileIds } }).select("_id name"),
+    ]);
+
+    // ── 4. Build lookup maps ────────────────────────────────────────────────
+    const profileCategoryMap = new Map(
+      profileCategoryDocs.map((c) => [c._id.toString(), c])
+    );
+    const subcatCategoryMap = new Map(
+      subcatCategoryDocs.map((c) => [c._id.toString(), c.name])
+    );
+    const subcatProfileMap = new Map(
+      subcatProfileDocs.map((p) => [p._id.toString(), p.name])
+    );
+    const productSubcatMap = new Map(
+      productSubcategoryDocs.map((s) => [s._id.toString(), s])
+    );
+    const productCategoryMap = new Map(
+      productCategoryDocs.map((c) => [c._id.toString(), c.name])
+    );
+    const productProfileMap = new Map(
+      productProfileDocs.map((p) => [p._id.toString(), p.name])
+    );
+
+    // ── 5. Shape response payloads ──────────────────────────────────────────
+
+    const categories = categoryDocs.map((c) => ({
+      _id: c._id,
+      name: c.name,
+      imageUrl: c.thumbnailImage ?? "",
+      categoryBannerImages: c.categoryBannerImages ?? [],
+      designCount: c.productCount ?? 0,
+    }));
+
+    const subcategoryProfiles = profileDocs.map((p) => {
+      const cat = profileCategoryMap.get(p.categoryId.toString());
+      return {
+        _id: p._id,
+        name: p.name,
+        // category context — needed for navigation to CategoryDetails
+        categoryId: p.categoryId,
+        categoryName: cat?.name ?? "",
+        imageUrl: cat?.thumbnailImage ?? "",
+        categoryBannerImages: cat?.categoryBannerImages ?? [],
+      };
+    });
+
+    const subcategories = subcategoryDocs.map((s) => ({
+      _id: s._id,
+      name: s.name,
+      imageUrl: s.thumbnailImage ?? "",
+      thumbnailImage: s.thumbnailImage ?? "",
+      images: s.images ?? [],
+      // parent context
+      categoryId: s.categoryId,
+      categoryName: subcatCategoryMap.get(s.categoryId.toString()) ?? "",
+      subcategoryProfileId: s.subcategoryProfileId ?? null,
+      subcategoryProfileName: s.subcategoryProfileId
+        ? (subcatProfileMap.get(s.subcategoryProfileId.toString()) ?? "")
+        : "",
+      // nav params
+      subtext: s.subtext ?? "",
+      description: s.description ?? "",
+      infoText: s.infoText ?? "",
+      filterSchema: s.filterSchema ?? [],
+      designCount: s.productCount ?? 0,
+      specialNotePlaceholderText: s.specialNotePlaceholderText ?? "Length variation",
+    }));
+
+    const products = productDocs.map((p) => {
+      const subcat = productSubcatMap.get(p.subcategoryId.toString());
+      return {
+        _id: p._id,
+        styleNo: p.styleNo,
+        name: p.name ?? "",
+        displayImage: p.displayImage ?? p.images?.[0] ?? "",
+        pointer: p.pointer ?? 0,
+        // subcategory context (full nav params so frontend doesn't need another fetch)
+        subcategoryId: p.subcategoryId,
+        subcategoryName: subcat?.name ?? "",
+        subcategoryThumbnailImage: subcat?.thumbnailImage ?? "",
+        subcategoryImages: subcat?.images ?? [],
+        subcategoryFilterSchema: subcat?.filterSchema ?? [],
+        subcategoryDescription: subcat?.description ?? "",
+        subcategorySubtext: subcat?.subtext ?? "",
+        specialNotePlaceholderText: subcat?.specialNotePlaceholderText ?? "Length variation",
+        // profile + category context
+        subcategoryProfileId: p.subcategoryProfileId ?? null,
+        subcategoryProfileName: p.subcategoryProfileId
+          ? (productProfileMap.get(p.subcategoryProfileId.toString()) ?? "")
+          : "",
+        categoryId: p.categoryId,
+        categoryName: productCategoryMap.get(p.categoryId.toString()) ?? "",
+      };
+    });
+
+    return res.status(200).json({ categories, subcategoryProfiles, subcategories, products });
+  } catch (err) {
+    console.error("[Search]", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+export default router;

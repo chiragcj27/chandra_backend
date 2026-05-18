@@ -8,6 +8,8 @@ import categoriesRouter from "./categories";
 import clientsRouter from "./clients";
 import ordersRouter from "./orders";
 import bulkOrderParserRouter from "./bulkOrderParser";
+import featuredCollectionsRouter from "./featuredCollections";
+import searchRouter from "./search";
 
 const routes = Router();
 
@@ -19,6 +21,8 @@ routes.use(categoriesRouter);
 routes.use(clientsRouter);
 routes.use(ordersRouter);
 routes.use(bulkOrderParserRouter);
+routes.use(featuredCollectionsRouter);
+routes.use(searchRouter);
 
 export default routes;
 

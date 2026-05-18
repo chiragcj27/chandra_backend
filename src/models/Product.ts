@@ -29,6 +29,7 @@ export interface ProductFilterValue {
 
 export interface ProductDocument extends Document {
   styleNo: string;
+  name?: string;
   categoryId: Types.ObjectId;
   subcategoryProfileId?: Types.ObjectId;
   subcategoryId: Types.ObjectId;
@@ -45,6 +46,8 @@ export interface ProductDocument extends Document {
   filter: ProductFilterValue[];
   embedding?: number[];
   images: string[];
+  displayImage?: string;
+  secondaryImage?: string;
   isActive: boolean;
   displayOrder: number;
   createdAt: Date;
@@ -93,6 +96,7 @@ const ProductFilterValueSchema = new Schema<ProductFilterValue>(
 const ProductSchema = new Schema<ProductDocument>(
   {
     styleNo: { type: String, required: true, unique: true },
+    name: { type: String },
     categoryId: { type: Schema.Types.ObjectId, ref: "Category", required: true },
     subcategoryProfileId: { type: Schema.Types.ObjectId, ref: "SubcategoryProfile" },
     subcategoryId: { type: Schema.Types.ObjectId, ref: "Subcategory", required: true },
@@ -109,6 +113,8 @@ const ProductSchema = new Schema<ProductDocument>(
     filter: { type: [ProductFilterValueSchema], default: [] },
     embedding: { type: [Number], select: false },
     images: { type: [String], default: [] },
+    displayImage: { type: String },
+    secondaryImage: { type: String },
     isActive: { type: Boolean, default: true },
     displayOrder: { type: Number, default: 0 },
   },
@@ -118,6 +124,8 @@ const ProductSchema = new Schema<ProductDocument>(
 ProductSchema.index({ styleNo: 1 }, { unique: true });
 ProductSchema.index({ subcategoryId: 1, isActive: 1 });
 ProductSchema.index({ subcategoryProfileId: 1, isActive: 1 });
+ProductSchema.index({ isActive: 1, isBestSeller: 1, subcategoryId: 1 });
+ProductSchema.index({ isActive: 1, isReadyToShip: 1, subcategoryId: 1 });
 
 export const Product =
   models.Product

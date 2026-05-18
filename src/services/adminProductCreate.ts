@@ -147,6 +147,7 @@ export function parseFiltersPlain(
 
 export type AdminProductCreateInput = {
   styleNo: string;
+  name?: string;
   categoryId: string;
   subcategoryProfileId?: string;
   subcategoryId: string;
@@ -159,6 +160,8 @@ export type AdminProductCreateInput = {
   pointer?: number;
   metalWeights?: MetalWeights;
   images?: string[];
+  displayImage?: string;
+  secondaryImage?: string;
   embedding?: number[];
   displayOrder?: number;
   isActive?: boolean;
@@ -184,6 +187,7 @@ function parseMetalWeightEntry(rawEntry: unknown, fallbackLabel: string) {
 /** Parse request body the same way as POST /admin/products */
 export function parseAdminProductBody(body: Record<string, unknown>): AdminProductCreateInput | null {
   const styleNo = asTrimmedString(body.styleNo);
+  const name = asTrimmedString(body.name);
   const categoryId = asTrimmedString(body.categoryId);
   const subcategoryProfileId = asTrimmedString(body.subcategoryProfileId);
   const subcategoryId = asTrimmedString(body.subcategoryId);
@@ -199,6 +203,8 @@ export function parseAdminProductBody(body: Record<string, unknown>): AdminProdu
   const isActive = typeof body.isActive === "boolean" ? body.isActive : true;
   const isBestSeller = typeof body.isBestSeller === "boolean" ? body.isBestSeller : false;
   const isReadyToShip = typeof body.isReadyToShip === "boolean" ? body.isReadyToShip : false;
+  const displayImage = asTrimmedString(body.displayImage);
+  const secondaryImage = asTrimmedString(body.secondaryImage);
   const images = Array.isArray(body.images)
     ? body.images
         .map((image) => asTrimmedString(image))
@@ -265,6 +271,7 @@ export function parseAdminProductBody(body: Record<string, unknown>): AdminProdu
 
   return {
     styleNo,
+    name,
     categoryId,
     subcategoryProfileId,
     subcategoryId,
@@ -277,6 +284,8 @@ export function parseAdminProductBody(body: Record<string, unknown>): AdminProdu
     pointer,
     metalWeights,
     images,
+    displayImage,
+    secondaryImage,
     embedding,
     displayOrder,
     isActive,
@@ -293,6 +302,7 @@ export type CreateAdminProductResult =
 export async function createAdminProduct(input: AdminProductCreateInput): Promise<CreateAdminProductResult> {
   const {
     styleNo,
+    name,
     categoryId,
     subcategoryProfileId,
     subcategoryId,
@@ -305,6 +315,8 @@ export async function createAdminProduct(input: AdminProductCreateInput): Promis
     pointer = 0,
     metalWeights = {},
     images = [],
+    displayImage,
+    secondaryImage,
     embedding = [],
     displayOrder = 0,
     isActive = true,
@@ -354,6 +366,7 @@ export async function createAdminProduct(input: AdminProductCreateInput): Promis
 
   const product = await Product.create({
     styleNo,
+    name,
     categoryId,
     subcategoryProfileId,
     subcategoryId,
@@ -366,6 +379,8 @@ export async function createAdminProduct(input: AdminProductCreateInput): Promis
     pointer,
     metalWeights,
     images,
+    displayImage,
+    secondaryImage,
     embedding,
     displayOrder,
     isActive,
@@ -574,6 +589,10 @@ function headerToCanonical(raw: string): string | null {
     is_ready_to_ship: "isReadyToShip",
     images: "images",
     image_urls: "images",
+    display_image: "displayImage",
+    displayimage: "displayImage",
+    secondary_image: "secondaryImage",
+    secondaryimage: "secondaryImage",
     embedding: "embedding",
     /** Plain text, e.g. `Metal: Gold; Color: White` */
     filters: "filtersPlain",
@@ -871,6 +890,8 @@ export function bulkProductGroupToAdminInput(
       pointer: parseNumber(fr.pointer) ?? 0,
       metalWeights: metalAgg.metal,
       images: splitList(fr.images),
+      displayImage: asTrimmedString(cellToString(fr.displayImage)),
+      secondaryImage: asTrimmedString(cellToString(fr.secondaryImage)),
       embedding: splitNumbers(fr.embedding),
       displayOrder: parseNumber(fr.displayOrder) ?? 0,
       isActive: isActive ?? true,

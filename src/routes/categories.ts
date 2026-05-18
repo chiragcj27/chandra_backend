@@ -6,6 +6,7 @@ import { Product } from "../models/Product";
 import { StoneShape } from "../models/StoneShape";
 import { Subcategory, type FilterField } from "../models/Subcategory";
 import { SubcategoryProfile } from "../models/SubcategoryProfile";
+import { getHighlightSubcategories } from "../services/highlightSubcategories";
 
 const router = Router();
 
@@ -140,13 +141,37 @@ router.get("/subcategories/:subcategoryId/products", async (req, res) => {
       return res.status(400).json({ error: "Invalid subcategoryId" });
     }
 
-    const products = await Product.find({ subcategoryId, isActive: true })
+    const query: Record<string, unknown> = { subcategoryId, isActive: true };
+    if (req.query.isBestSeller === "true") query.isBestSeller = true;
+    if (req.query.isReadyToShip === "true") query.isReadyToShip = true;
+
+    const products = await Product.find(query)
       .sort({ displayOrder: 1, createdAt: -1 })
       .select(
-        "_id styleNo makeType description remarks images isReadyToShip isBestSeller totalDiamondPcs totalDiamondWeightCt pointer metalWeights diamonds filter",
+        "_id name styleNo makeType description remarks images displayImage secondaryImage isReadyToShip isBestSeller totalDiamondPcs totalDiamondWeightCt pointer metalWeights diamonds filter",
       );
 
     return res.status(200).json({ products });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/** Subcategories that contain at least one active best-seller product. */
+router.get("/best-sellers", async (_req, res) => {
+  try {
+    const subcategories = await getHighlightSubcategories("isBestSeller");
+    return res.status(200).json({ subcategories });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/** Subcategories that contain at least one active ready-to-ship product. */
+router.get("/ready-to-ship", async (_req, res) => {
+  try {
+    const subcategories = await getHighlightSubcategories("isReadyToShip");
+    return res.status(200).json({ subcategories });
   } catch {
     return res.status(500).json({ error: "Server error" });
   }
