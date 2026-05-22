@@ -12,25 +12,22 @@ function escapeRegex(str: string): string {
 }
 
 /**
- * Splits a query into individual words and builds a Mongoose filter that
- * requires EVERY word to appear in at least one of the given fields.
- *
- * This makes word order irrelevant:
- *   "necklace low profile"  →  matches "Low Profile Necklace"  ✓
- *   "low profile necklace"  →  same result                      ✓
+ * ANY-word query — at least one word must appear in any of the given fields.
+ * Used for subcategories and products where a query can mix categorical terms
+ * ("rings") with attribute/filter terms ("round"). Requiring ALL words would
+ * return nothing because "round" never appears in a subcategory name.
+ *   "round rings" → finds "Solitaire Rings" (matches "rings") ✓
  */
-function buildWordQuery(
+function buildAnyWordQuery(
   fields: string[],
   words: string[]
 ): Record<string, unknown> {
   const conditions = words.map((word) => {
     const re = new RegExp(escapeRegex(word), "i");
-    // Single field — no $or wrapper needed
     if (fields.length === 1) return { [fields[0]]: re };
-    // Multiple fields — word can appear in any one of them
     return { $or: fields.map((f) => ({ [f]: re })) };
   });
-  return conditions.length === 1 ? conditions[0] : { $and: conditions };
+  return conditions.length === 1 ? conditions[0] : { $or: conditions };
 }
 
 /** Splits raw input into non-empty words. */
@@ -71,23 +68,24 @@ router.get("/search", async (req, res) => {
 
     // ── 1. Parallel first-pass queries (no populate needed yet) ─────────────
     const [categoryDocs, profileDocs, subcategoryDocs, productDocs] = await Promise.all([
-      // Categories: every word must appear in name (order-independent)
-      Category.find({ isActive: true, ...buildWordQuery(["name"], words) })
+      // Categories: any word must appear in name
+      Category.find({ isActive: true, ...buildAnyWordQuery(["name"], words) })
         .sort({ displayOrder: 1, createdAt: -1 })
         .limit(RESULTS_PER_TYPE)
         .select("_id name thumbnailImage categoryBannerImages productCount"),
 
-      // SubcategoryProfiles: every word must appear in name
-      SubcategoryProfile.find({ isActive: true, ...buildWordQuery(["name"], words) })
+      // SubcategoryProfiles: any word must appear in name
+      SubcategoryProfile.find({ isActive: true, ...buildAnyWordQuery(["name"], words) })
         .sort({ displayOrder: 1, createdAt: -1 })
         .limit(RESULTS_PER_TYPE)
         .select("_id name categoryId"),
 
-      // Subcategories: every word must appear in name, subtext, OR description
-      // Each word is independently matched across the three fields.
+      // Subcategories: ANY word must appear in name, subtext, or description.
+      // Using any-word so "round rings" still finds "Solitaire Rings" even though
+      // "round" does not appear in its name.
       Subcategory.find({
         isActive: true,
-        ...buildWordQuery(["name", "subtext", "description"], words),
+        ...buildAnyWordQuery(["name", "subtext", "description"], words),
       })
         .sort({ displayOrder: 1, createdAt: -1 })
         .limit(RESULTS_PER_TYPE)
@@ -96,15 +94,17 @@ router.get("/search", async (req, res) => {
           "subtext description infoText filterSchema productCount specialNotePlaceholderText"
         ),
 
-      // Products: every word must appear in styleNo OR name
+      // Products: ANY word must appear in styleNo, name, or any filter value.
+      // "round rings" → matches products whose filterValue contains "Round"
+      // even though no product name contains "rings".
       Product.find({
         isActive: true,
-        ...buildWordQuery(["styleNo", "name"], words),
+        ...buildAnyWordQuery(["styleNo", "name", "filter.filterValue"], words),
       })
         .sort({ displayOrder: 1, createdAt: -1 })
         .limit(RESULTS_PER_TYPE)
         .select(
-          "_id styleNo name displayImage images pointer " +
+          "_id styleNo name displayImage images pointer totalDiamondWeightCt filter " +
           "subcategoryId subcategoryProfileId categoryId"
         ),
     ]);
@@ -228,6 +228,8 @@ router.get("/search", async (req, res) => {
         name: p.name ?? "",
         displayImage: p.displayImage ?? p.images?.[0] ?? "",
         pointer: p.pointer ?? 0,
+        totalDiamondWeightCt: p.totalDiamondWeightCt ?? 0,
+        filter: p.filter ?? [],
         // subcategory context (full nav params so frontend doesn't need another fetch)
         subcategoryId: p.subcategoryId,
         subcategoryName: subcat?.name ?? "",
