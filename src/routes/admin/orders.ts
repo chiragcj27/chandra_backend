@@ -1,6 +1,9 @@
+import crypto from "crypto";
 import { Router } from "express";
 
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
+import { env } from "../../config/env";
+import { deleteObject, presignPutObject, s3KeyToPublicUrl } from "../../services/s3";
 import { ORDER_STATUSES, Order, type OrderStatus } from "../../models/Order";
 
 const router = Router();
@@ -182,6 +185,84 @@ router.patch("/orders/:id/cancel", requireAuth, requireRole("admin"), async (req
     await order.save();
     return res.status(200).json({ order });
   } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+function sanitizeInvoiceFilename(name: string): string {
+  return name
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+}
+
+router.post("/orders/:id/invoices/presign", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!env.aws) return res.status(503).json({ error: "S3 is not configured" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    const body = req.body as { fileName?: string; contentType?: string };
+    const contentType = body.contentType?.trim();
+    const originalName = body.fileName?.trim() || "invoice.pdf";
+
+    if (!contentType) return res.status(400).json({ error: "contentType is required" });
+    if (contentType !== "application/pdf") {
+      return res.status(400).json({ error: "Only PDF uploads are allowed" });
+    }
+
+    const safeName = sanitizeInvoiceFilename(originalName);
+    const key = `orders/invoices/${req.params.id}/${crypto.randomUUID()}-${safeName}`;
+    const uploadUrl = await presignPutObject({ key, contentType, expiresInSeconds: 120 });
+    return res.status(200).json({ key, uploadUrl });
+  } catch (err) {
+    console.error("[orders/invoices/presign]", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.post("/orders/:id/invoices", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!env.aws) return res.status(503).json({ error: "S3 is not configured" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    const body = req.body as { key?: string; filename?: string };
+    const key = body.key?.trim();
+    const filename = body.filename?.trim();
+
+    if (!key || !filename) return res.status(400).json({ error: "key and filename are required" });
+    if (!key.startsWith(`orders/invoices/${req.params.id}/`)) {
+      return res.status(400).json({ error: "Invalid key for this order" });
+    }
+
+    const url = s3KeyToPublicUrl(key);
+    order.invoices.push({ key, filename, url, uploadedAt: new Date() } as never);
+    await order.save();
+    return res.status(200).json({ order });
+  } catch (err) {
+    console.error("[orders/invoices POST]", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.delete("/orders/:id/invoices/:invoiceId", requireAuth, requireRole("admin"), async (req, res) => {
+  if (!env.aws) return res.status(503).json({ error: "S3 is not configured" });
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    const invoice = order.invoices.find((inv) => String(inv._id) === req.params.invoiceId);
+    if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+
+    await deleteObject(invoice.key);
+    order.invoices = order.invoices.filter((inv) => String(inv._id) !== req.params.invoiceId) as never;
+    await order.save();
+    return res.status(200).json({ order });
+  } catch (err) {
+    console.error("[orders/invoices DELETE]", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
