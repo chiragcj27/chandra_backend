@@ -5,6 +5,11 @@ import mongoose from "mongoose";
 import app from "./app";
 import { connectDB } from "./config/db";
 import { env } from "./config/env";
+import {
+  startSchedulers,
+  stopSchedulers,
+} from "./production-planner/services/bootstrap/schedulers";
+import { seedDefaultColumnMaps } from "./production-planner/services/bootstrap/seedDefaultColumnMaps";
 import { ensureAdminUser } from "./services/bootstrapAdmin";
 
 dotenv.config();
@@ -14,6 +19,8 @@ const PORT = env.PORT;
 async function start() {
   await connectDB();
   await ensureAdminUser();
+  await seedDefaultColumnMaps();
+  startSchedulers();
 
   const server: HttpServer = app.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
@@ -21,6 +28,7 @@ async function start() {
 
   const shutdown = async (signal: string) => {
     console.log(`Received ${signal}. Shutting down...`);
+    stopSchedulers();
     server.close(() => {
       // Ensure mongoose is closed before exiting.
       mongoose.connection
