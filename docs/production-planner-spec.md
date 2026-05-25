@@ -281,7 +281,7 @@ All collections under `production-planner/models/`. No edits to existing chandra
 | Collection | Key fields |
 |---|---|
 | `JobCard` | `gatiPieceCode` (PK, `OrderNo/SrNo`), `orderNumber`, `orderItemSrNo`, `totalQty`, `styleNo`, `size`, `customerCode`, `diamondSpecs[]` (`{gSize, sieve, diaSizeMM, pointer, totalCaratsPerPiece, stonesPerPiece}`), `totalStones`, `metalType`, `metalWeightPerPiece`, `totalMetalWeight`, `findings[]`, `findingsReceived` (bool), `priority` (`normal`\|`urgent`\|`critical`), `expectedDeliveryAt`, `status` (`planned`\|`in_progress`\|`on_hold`\|`completed`\|`cancelled`), `currentStageDistribution[]` (`{stageCode, cellCode, qty}`), `plannedCompletionAt`, `actualCompletionAt`, `orderedAt`, timestamps |
-| `StageMovement` | `jobCardId`, `fromStageCode`, `toStageCode`, `cellId`, `seatId`, `qty`, `enteredAt`, `exitedAt`, `durationHours`, `qcResult` (`pass`\|`fail`\|`rework`\|null), `rejectionReason`, `weightInGrams`, `weightOutGrams`, `stonesIn`, `stonesOut`, `notes`, `attachments[]` (S3 keys) |
+| `StageMovement` | `jobCardId`, `fromStageCode`, `toStageCode`, `cellId`, `seatId`, `qty`, `enteredAt`, `exitedAt`, `durationHours`, `qcResult` (`pass`\|`fail`\|`rework`\|null), `rejectionReason`, `weightInGrams`, `weightOutGrams`, `stonesIn`, `stonesOut`, `notes` |
 | `OrderProductionState` | `orderNumber` (PK), `chandraOrderId`, `aggregateStatus`, `jobCardCount`, `completedCount`, `delayedCount`, `lastUpdatedAt` |
 
 ### 4.3 Inventory
@@ -365,7 +365,7 @@ Response: `[{ diamondCode, gSize, sieve, mm, onHand, allocated, available, requi
 - `GET /admin/production/dashboards/orders?status=&customerCode=&priority=&deliveryBefore=&isLate=`
   Returns **order-level rollups**: `[{ orderNumber, customerCode, expectedDeliveryAt (earliest among pieces), totalQty, totalPieces (= JobCard count), inProgressCount, completedCount, delayedCount, stageDistribution[] (rolled-up qty by stage), worstLatenessDays, priority, status }]`.
 - `GET /admin/production/dashboards/orders/:orderNumber` — drill-in: order header + array of all JobCards in the order with their `currentStageDistribution`, time-in-stage, lateness flags.
-- `GET /admin/production/job-cards/:id` — single line item detail by Mongo `_id` (called when a user clicks into a specific piece from the per-order view). Use `GET /job-cards/by-code?code=` to look up by `gatiPieceCode`, which contains slashes.
+- `GET /admin/production/job-cards/:gatiPieceCode` — single line item detail + StageMovement timeline (called when a user clicks into a specific piece from the per-order view).
 - `GET /admin/production/job-cards?...` — flat JobCard search (advanced filter, e.g. "show all pieces stuck at SETTING across all orders").
 
 **Alert rules** (see Section 6.4).
@@ -476,122 +476,86 @@ All persisted in `Alert` collection with ack/resolve workflow.
 
 ---
 
-## 8. Complete Backend API Surface (as implemented)
+## 8. Complete Backend API Surface
 
-**Base path:** every route below is prefixed by `/admin/production` (mounted from `src/routes/admin/index.ts`).
-**Auth:** existing chandra `requireAuth + requireRole("admin")` middleware on every route. Bearer JWT in `Authorization` header.
-**Multipart uploads:** `file` field, in-memory parse, accepts `.xlsx` / `.xls` / `.csv`, 25 MB cap.
-
-### Identifier conventions
-
-| Identifier | Where it lives | Why it matters |
-|---|---|---|
-| `gatiPieceCode` | JobCard primary key — e.g. `CO/REG/26-27/0112/1` | Contains `/` — **never safe to put in a URL path**. Use Mongo `_id` for path-based sub-actions, or `?code=` query param for lookup. |
-| Diamond `code` | Diamond primary key — e.g. `+2-6.5 CRD\|2-2.5 CRD\|1.25` | Contains `|`/spaces — same constraint. Use `?code=` query param. |
-| Stage/Cell `code` | StageDefinition / Cell primary keys | Single segment, URL-safe. |
-| Mongo `_id` | All collections | ObjectId, URL-safe; preferred for path params. |
+**Auth:** existing chandra `requireAuth("admin")` middleware. All routes require admin role.
 
 ### Configuration
-- `GET/POST /stages`, `GET/PUT/DELETE /stages/:code` — StageDefinition CRUD (`code` upper-cased)
-- `GET/POST /cells`, `GET/PUT/DELETE /cells/:code` — Cell CRUD
-- `GET /seats?cellCode=`, `POST /seats`, `GET/PUT/DELETE /seats/:code` — Seat CRUD
-- `GET/PUT /calendar` — ProductionCalendar (singleton, auto-created on first GET)
-- `GET/PUT /column-maps/:fileType` — GatiColumnMap (`fileType` = `orders` \| `wip`)
+- `GET/POST/PUT/DELETE /admin/production/stages` — StageDefinition CRUD
+- `GET/POST/PUT/DELETE /admin/production/cells` — Cell CRUD
+- `GET/POST/PUT/DELETE /admin/production/seats` — Seat CRUD
+- `GET/PUT /admin/production/calendar` — ProductionCalendar
+- `GET/PUT /admin/production/column-maps/:fileType` — GatiColumnMap (orders|wip)
+- `GET/POST/PUT/DELETE /admin/production/product-bom` — ProductBom
 
 ### Imports
-- `POST /imports/gati-orders` (multipart `file`) — runs the Order Excel pivot importer synchronously, returns the persisted `GatiImportRun`
-- `POST /imports/gati-wip` (multipart `file`) — runs the WIP diff importer, then fires baseline recompute + alert engine in the background
-- `GET /imports/runs?fileType=&status=&limit=&skip=` — list runs (omits `rowErrors[]` for size)
-- `GET /imports/runs/:id` — full detail with `rowErrors[]` and `unmappedColumns[]`
-
-> The earlier draft mentioned a `POST /imports/runs/:id/retry-row` endpoint — that's **not implemented yet**. Fix the underlying data and re-upload the file; the importer is idempotent on `gatiPieceCode`.
+- `POST /admin/production/imports/gati-orders` — upload Order CSV/XLSX
+- `POST /admin/production/imports/gati-wip` — upload WIP CSV/XLSX
+- `GET /admin/production/imports/runs?fileType=&status=` — list import runs
+- `GET /admin/production/imports/runs/:id` — run detail with errors
+- `POST /admin/production/imports/runs/:id/retry-row` — fix-and-retry a single error
 
 ### Job cards & movements
-- `GET /job-cards?status=&customerCode=&priority=&orderNumber=&deliveryBefore=&isLate=&limit=&skip=` — list
-- `GET /job-cards/by-code?code=<gatiPieceCode>` — lookup by GatiSOFT code (use this for the slash-containing key)
-- `GET /job-cards/:id` — lookup by Mongo `_id`
-- `PUT /job-cards/:id/findings` `{ received: boolean }` — toggle findingsReceived (uses Mongo `_id`)
-- `PUT /job-cards/:id/priority` `{ priority: "normal" \| "urgent" \| "critical" }` — change priority
-- `GET /job-cards/:id/movements` — full StageMovement timeline (newest first)
-- `GET /movements?gatiPieceCode=&stageCode=&cellCode=&from=&to=&open=true&limit=&skip=` — raw movement list
-
-> No `POST /movements` for manual overrides in v1 — movement creation is owned by the WIP import path. Add later if floor app comes online.
+- `GET /admin/production/job-cards?status=&stage=&customer=&priority=&deliveryBefore=&isLate=` — list
+- `GET /admin/production/job-cards/:gatiPieceCode` — detail + StageMovement timeline
+- `PUT /admin/production/job-cards/:gatiPieceCode/findings` — toggle findingsReceived
+- `PUT /admin/production/job-cards/:gatiPieceCode/priority` — manual priority override
+- `GET /admin/production/movements?stageCode=&cellCode=&from=&to=` — raw movement list
+- `POST /admin/production/movements` — manual movement entry (admin override)
 
 ### Planning
-- `GET /dashboards/capacity` — per-stage queue + capacity + current bottlenecks + month-load gauge
-- `POST /planning/baselines/recompute` — manually refresh capacity baselines (also runs automatically every 6h via the scheduler and after every WIP import)
-- `POST /planning/check` `{ orderSpec: { totalQty, totalStones?, totalGrams?, requiresStages?[], excludeStages?[], expectedDeliveryAt?, priority? } }` — full calculator: leadTimeDays, estimatedCompletionAt, bottleneckStage, capacityStatus, overtimeHoursNeeded, onTimeProbability, criticalPath[], perStage[], warnings[]
-- `GET /planning/lead-time?totalQty=&totalStones=&totalGrams=&priority=` — quick estimate (wraps `/planning/check`)
+- `POST /admin/production/planning/check` — capacity check for a hypothetical order
+- `GET /admin/production/planning/lead-time?stoneCount=&grams=&priority=` — quick estimate
 
 ### What-If
-- `POST /what-if/simulate` `{ changes: { addCellsByStage?, overtimeHoursPerDay?, newOrders?[], reprioritize?[] } }` — returns jobCardImpacts, stageLoadImpacts, costDelta, summary (ordersSaved/slipping)
-- `GET /what-if/scenarios`, `POST /what-if/scenarios`, `DELETE /what-if/scenarios/:id` — save / list / delete named scenarios
+- `POST /admin/production/what-if/simulate`
+- `GET/POST /admin/production/what-if/scenarios`
 
-### Tracking dashboards (read-only aggregates)
-- `GET /dashboards/orders?status=&customerCode=&priority=&deliveryBefore=&isLate=` — **primary tracking view** — one row per `OrderNoWithoutSrNo` with rolled-up `stageDistribution[]`, progress counts, `worstLatenessDays`
-- `GET /dashboards/orders/:orderNumber` — drill-in (URL-encode the order number once; it does NOT contain `/`)
-- `GET /dashboards/capacity` — see Planning above
-- `GET /dashboards/analytics?from=&to=` — on-time %, cycle time per stage, daily movement trend, anomaly counts by type, material-loss summary
+### Dashboards (read-only aggregates)
+- `GET /admin/production/dashboards/capacity` — capacity gauge + per-stage queue
+- `GET /admin/production/dashboards/orders?...` — **primary tracking view** — order-grouped rollups (one row per `OrderNoWithoutSrNo`)
+- `GET /admin/production/dashboards/orders/:orderNumber` — order drill-in: all JobCards in the order with stage info
+- `GET /admin/production/dashboards/analytics?period=` — on-time %, cycle-time trends, anomaly flags
 
 ### Inventory — Diamonds
-- `GET /inventory/diamonds?active=&q=&limit=&skip=` — list (q matches code/gSize/sieve)
-- `GET /inventory/diamonds/by-code?code=` — single (the `|`-containing code stays in a query param)
-- `POST /inventory/diamonds` — manual create (auto-seed handles most)
-- `PUT /inventory/diamonds/by-code?code=` — edit cost, threshold, leadTime, supplier, clarity, color
-- `DELETE /inventory/diamonds/by-code?code=` — soft-delete (`active=false`)
-
-### Inventory — Ledger & Allocations
-- `POST /inventory/ledger` `{ diamondCode, movementType, quantity, jobCardId?, gatiPieceCode?, referenceDoc?, notes? }` — GRN / adjustment / return / etc. (signed `quantity`)
-- `GET /inventory/diamonds/:code/ledger?limit=` — single-segment codes only
-- `GET /inventory/diamonds-ledger/by-code?code=&limit=` — for `|`-containing codes
-- `POST /inventory/allocations` `{ jobCardId, diamondCode, qty, notes? }` — soft-reserve; writes both `DiamondAllocation` and a balancing negative ledger entry
-- `POST /inventory/allocations/:id/consume` `{ qty? }` — convert reservation to consumption (`qty` omitted = consume the full remaining)
-- `POST /inventory/allocations/:id/release` — release unused reservation; writes a positive `return` ledger entry
-- `GET /inventory/allocations/by-job-card/:id`
-
-### Inventory — Requirements
-- `GET /inventory/requirements?status=` — full table (`status` filter: `ok` \| `low` \| `shortage` \| `critical`)
-- `GET /inventory/shortages` — only rows with `delta < 0`
+- `GET/POST/PUT/DELETE /admin/production/inventory/diamonds` — Diamond master CRUD
+- `GET /admin/production/inventory/requirements` — table with available/required/delta
+- `GET /admin/production/inventory/shortages` — only shortage rows
+- `GET /admin/production/inventory/diamonds/:code/ledger` — per-SKU ledger
+- `POST /admin/production/inventory/ledger` — add ledger entry (GRN/adjustment/etc.)
+- `POST /admin/production/inventory/allocations` — manual allocation
+- `POST /admin/production/inventory/allocations/:id/consume` — convert allocation to consumption
 
 ### Inventory — Metal
-- `POST /inventory/metal-ledger` `{ metalType, movementType, weightGrams, jobCardId?, stageCode?, cellCode?, notes? }` — signed grams
-- `GET /inventory/metal-ledger/by-job-card/:id` — returns entries + `netGrams`
+- `POST /admin/production/inventory/metal-ledger` — issue/return entry
+- `GET /admin/production/inventory/metal-ledger/by-job-card/:gatiPieceCode`
 
 ### Material Loss
-- `GET /material-loss/summary?from=&to=` — gold/stone loss roll-up + percentages
-- `GET /material-loss/by-stage?from=&to=`
-- `GET /material-loss/by-cell?from=&to=`
-- `GET /material-loss/by-job-card/:id` (Mongo `_id`)
+- `GET /admin/production/material-loss/summary?from=&to=`
+- `GET /admin/production/material-loss/by-stage`
+- `GET /admin/production/material-loss/by-cell`
+- `GET /admin/production/material-loss/by-job-card/:id`
 
 ### Purchase Orders (auto-PO)
-- `GET /purchase-orders?status=&limit=&skip=` — list (`status` = `draft` \| `approved` \| `sent` \| `received` \| `cancelled`)
-- `GET /purchase-orders/:id`
-- `POST /purchase-orders` `{ poNumber?, supplier?, lines[{diamondCode, qty, costEstimate?, notes?}], notes? }` — manual create
-- `PUT /purchase-orders/:id` — edit (only allowed while status=`draft`)
-- `POST /purchase-orders/:id/approve` — flip to `approved`
-- `POST /purchase-orders/:id/cancel` — flip to `cancelled` (forbidden after `received`)
-- `POST /purchase-orders/generate-from-shortages` — scan requirements, group by `preferredSupplier`, refresh open drafts or create new ones. Idempotent per supplier.
+- `GET /admin/production/purchase-orders?status=` — list
+- `GET /admin/production/purchase-orders/:id`
+- `POST /admin/production/purchase-orders` — manual create
+- `PUT /admin/production/purchase-orders/:id`
+- `POST /admin/production/purchase-orders/:id/approve`
+- `POST /admin/production/purchase-orders/:id/cancel`
 
 ### Alerts
-- `GET /alerts?severity=&type=&subjectType=&status=open|acknowledged|resolved&limit=&skip=` — list, sorted critical-first then by recency
-- `POST /alerts/:id/acknowledge`
-- `POST /alerts/:id/resolve`
-- `POST /alerts/run` — manually trigger the full scan (stuck pieces, delivery overdue, QC rework, zombie orders, diamond shortages, anomaly detection — baseline drift / stale stages / loss spikes)
-
-### Anomaly preview
-- `POST /anomalies/detect` — preview the anomaly detector's candidates without persisting them. (The regular `/alerts/run` already persists them on every scan.)
-
-### Schedulers (background, no endpoints)
-- `recomputeBaselines` runs every **6 hours** by default
-- `runAlertRules` runs every **15 minutes** by default
-- Tune via env: `PRODUCTION_PLANNER_BASELINE_INTERVAL_MIN`, `PRODUCTION_PLANNER_ALERT_INTERVAL_MIN`
-- Disable entirely: `PRODUCTION_PLANNER_DISABLE_SCHEDULERS=true`
+- `GET /admin/production/alerts?severity=&type=&status=open|all` — list
+- `POST /admin/production/alerts/:id/acknowledge`
+- `POST /admin/production/alerts/:id/resolve`
 
 ---
 
 ## 9. Frontend Application — What to Build
 
-> Audience: a frontend Claude generating prototypes. Stack assumed: React + TypeScript + Tanstack Query + Tanstack Table + Recharts (or equivalent). Reuse the existing chandra admin auth flow (Bearer JWT in `Authorization` header).
+> **Note**: §9 is the original architectural sketch (information architecture + page-purpose summary). For the actual implementation, **§14 is the canonical build catalog** — it covers the same screens but with mobile/tablet APP conventions (bottom tabs / drawer, cards instead of tables, sheets instead of modals, touch ergonomics). FE Claude builds from §14.
+>
+> **Platform**: mobile + tablet APP (React Native + Expo recommended; or Flutter — FE Claude picks). Reuses existing chandra admin JWT auth.
 
 ### 9.1 Information Architecture
 
@@ -708,10 +672,10 @@ All persisted in `Alert` collection with ack/resolve workflow.
 - Metal info card
 - Findings card (received toggle)
 - Current stage distribution (chips)
-- **Timeline of StageMovements** (vertical, with durations, QC results, weight in/out, attachments)
+- **Timeline of StageMovements** (vertical, with durations, QC results, weight in/out)
 - Material loss summary (gold + stones)
 - Action buttons: change priority, manual movement override
-**APIs:** `GET /job-cards/:id` (or `/job-cards/by-code?code=` for slash-containing codes), `GET /job-cards/:id/movements`, `PUT /job-cards/:id/findings`, `PUT /job-cards/:id/priority`
+**APIs:** `GET /job-cards/:gatiPieceCode`, `PUT .../findings`, `PUT .../priority`, `POST /movements`
 
 #### Page: Capacity Dashboard
 **Purpose:** Flow 2 visualization
@@ -767,7 +731,7 @@ All persisted in `Alert` collection with ack/resolve workflow.
 - Table of ledger entries: date, type, qty (signed), reference doc, jobCard link, notes
 - Running balance column
 - Add Entry form (modal): GRN, adjustment, return
-**APIs:** `GET /inventory/diamonds-ledger/by-code?code=` (codes contain `|`), `POST /inventory/ledger`
+**APIs:** `GET /inventory/diamonds/:code/ledger`, `POST /inventory/ledger`
 
 #### Page: Metal Ledger
 **Components:**
@@ -941,14 +905,14 @@ UAT gate: steps 1, 6, and 7 must round-trip the actual GatiSOFT CSVs with zero d
 | Decision | Choice | Reasoning |
 |---|---|---|
 | Processing model | **Synchronous** — block until done, return run summary | Order files are small (≤ hundreds of rows). Sync keeps the API simple. Easy to swap to a background queue later behind the same endpoint. |
-| File archival | **None** — parse in memory, then discard the buffer. `GatiImportRun` keeps the `fileName`, counts, `rowErrors[]`, and timestamps, which is sufficient audit. | We don't need to retain uploaded artifacts. Removes the S3 dependency from the import path entirely. |
+| File archival | **None** — parse in memory, then discard the buffer. `GatiImportRun` keeps the `fileName`, counts, `rowErrors[]`, and timestamps, which is sufficient audit. | Uploaded Excel files are not retained anywhere — no cloud storage, no disk. The structured import data is all we need. |
 | Default column map | **Seeded at startup** — first boot creates a default `GatiColumnMap(fileType="orders")` with the aliases and column mappings derived from the sample CSV | System works out-of-box. Admin can edit via existing `PUT /column-maps/orders`. |
 | Order linkage | **Best-effort lookup** — find chandra `Order` by `orderNumber`; if present set `JobCard.chandraOrderId`, else leave null. **Never create a chandra Order.** | Read-only against chandra side. Keeps modules decoupled. |
 | Diamond SKU key | `(gSize, sieve, diaSizeMM)` only — `pointer`, `clarity`, `color` stored on the master but not part of the key | Matches §1.5 spec. Clarity/color absent in current sample. |
 | Idempotency | Upsert by `gatiPieceCode`; on existing JobCard only mutate **non-key** fields (qty, specs, expectedDeliveryAt) — never overwrite `currentStageDistribution` or `status` (those are owned by Phase 2 WIP import) | Order Excel is the source of intent; WIP is the source of progress. They must not stomp on each other. |
 | Re-upload | Same file → 0 inserts, 0 updates (deep equality check on mutable fields) | Idempotency requirement from §12 verification step 1. |
 | Date parsing | GatiSOFT format `MM/DD/YYYY` locked in column map config (`dateFormat: "MM/DD/YYYY"`); helper rejects unparseable rows with explicit error | Sample shows `04/14/2026` — US-style. |
-| Multer storage | **In-memory** (Buffer) — parsed and discarded; never written to disk or S3 | Stateless, container-safe. |
+| Multer storage | **In-memory** (Buffer) — parsed and discarded; never written to disk or cloud | Stateless, container-safe. |
 | Auth | `requireAuth + requireRole("admin")` on every Phase 1 route | Matches Phase 0 pattern. |
 
 ### 13.3 Files to create
@@ -1023,19 +987,18 @@ Builds code via existing `buildDiamondCode()` helper in [models/diamond.ts](src/
 - `GET /imports/runs?fileType=&status=` — list, newest first, paginated (limit/skip)
 - `GET /imports/runs/:id` — full detail with `rowErrors[]` and `unmappedColumns[]`
 
-**`routes/jobCards.ts`** — `gatiPieceCode` contains slashes, so sub-actions key on Mongo `_id` and lookup-by-code uses `?code=`:
-- `GET /job-cards?status=&customerCode=&priority=&orderNumber=&deliveryBefore=&isLate=&limit=&skip=`
-- `GET /job-cards/by-code?code=<gatiPieceCode>` — lookup by GatiSOFT code
-- `GET /job-cards/:id` — lookup by Mongo `_id`
-- `PUT /job-cards/:id/findings` — body `{ received: boolean }`
-- `PUT /job-cards/:id/priority` — body `{ priority: "normal" | "urgent" | "critical" }`
+**`routes/jobCards.ts`**:
+- `GET /job-cards?status=&customer=&priority=&orderNumber=&deliveryBefore=&isLate=&limit=&skip=`
+- `GET /job-cards/:gatiPieceCode` — single, full detail (Phase 1: no StageMovement timeline yet — empty array; Phase 2 fills it)
+- `PUT /job-cards/:gatiPieceCode/findings` — body `{ received: boolean }`
+- `PUT /job-cards/:gatiPieceCode/priority` — body `{ priority: "normal" | "urgent" | "critical" }`
 
-**`routes/diamonds.ts`** — diamond codes contain `|`, so sub-actions use `?code=`:
-- `GET /inventory/diamonds?active=&q=&limit=&skip=` — list (q = substring on code/gSize/sieve)
-- `GET /inventory/diamonds/by-code?code=` — single
+**`routes/diamonds.ts`** — admin diamond master:
+- `GET /inventory/diamonds?active=&q=` — list (q = substring on code/gSize/sieve)
+- `GET /inventory/diamonds/:code`
 - `POST /inventory/diamonds` — manual create (rare; auto-seed handles most)
-- `PUT /inventory/diamonds/by-code?code=` — fill in cost, threshold, leadTime, supplier, clarity, color
-- `DELETE /inventory/diamonds/by-code?code=` — soft delete (`active=false`)
+- `PUT /inventory/diamonds/:code` — fill in cost, threshold, leadTime, supplier, clarity, color
+- `DELETE /inventory/diamonds/:code` — soft delete (`active=false`); hard delete forbidden if any allocation/ledger entry exists
 
 #### Router updates
 
@@ -1049,17 +1012,11 @@ router.use(diamondsRouter);
 
 #### Server bootstrap
 
-[src/server.ts](src/server.ts) — add bootstrap + scheduler calls in the start sequence after `ensureAdminUser()`:
+[src/server.ts](src/server.ts) — add ONE line in the start sequence after `ensureAdminUser()`:
 ```ts
 await seedDefaultColumnMaps();
-startSchedulers();   // (added in Phase 5)
 ```
-And call `stopSchedulers()` in the shutdown handler.
-Plus one mount line in [routes/admin/index.ts](src/routes/admin/index.ts):
-```ts
-router.use("/production", productionPlannerRouter);
-```
-Those are the only existing-file edits the whole module needs.
+This is the only existing-file edit Phase 1 needs.
 
 ### 13.4 Endpoints summary (Phase 1)
 
@@ -1069,15 +1026,14 @@ Those are the only existing-file edits the whole module needs.
 | GET  | `/admin/production/imports/runs` | List import runs |
 | GET  | `/admin/production/imports/runs/:id` | Run detail |
 | GET  | `/admin/production/job-cards` | Filterable list |
-| GET  | `/admin/production/job-cards/by-code?code=` | Lookup by GatiSOFT code (slashes) |
-| GET  | `/admin/production/job-cards/:id` | Lookup by Mongo `_id` |
-| PUT  | `/admin/production/job-cards/:id/findings` | Toggle findingsReceived |
-| PUT  | `/admin/production/job-cards/:id/priority` | Override priority |
+| GET  | `/admin/production/job-cards/:gatiPieceCode` | Single line item |
+| PUT  | `/admin/production/job-cards/:gatiPieceCode/findings` | Toggle findingsReceived |
+| PUT  | `/admin/production/job-cards/:gatiPieceCode/priority` | Override priority |
 | GET  | `/admin/production/inventory/diamonds` | List Diamond SKUs |
-| GET  | `/admin/production/inventory/diamonds/by-code?code=` | Single Diamond |
+| GET  | `/admin/production/inventory/diamonds/:code` | Single Diamond |
 | POST | `/admin/production/inventory/diamonds` | Manual create |
-| PUT  | `/admin/production/inventory/diamonds/by-code?code=` | Fill in cost/threshold/etc. |
-| DELETE | `/admin/production/inventory/diamonds/by-code?code=` | Soft delete |
+| PUT  | `/admin/production/inventory/diamonds/:code` | Fill in cost/threshold/etc. |
+| DELETE | `/admin/production/inventory/diamonds/:code` | Soft delete |
 
 ### 13.5 Verification (Phase 1 only — re-runs the relevant pieces of §12)
 
@@ -1104,5 +1060,293 @@ Those are the only existing-file edits the whole module needs.
 - No MetalLedger usage (Phase 4)
 - No PurchaseOrderDraft / auto-PO (Phase 4)
 - No what-if simulator (Phase 3)
-- No frontend code (handled by frontend Claude using §9 of this spec)
+- No frontend code (handled by frontend Claude using §9 + §14 of this spec)
 
+---
+
+## 14. Frontend Build Catalog — Every Screen, Every Function
+
+> A clean enumeration of every screen the frontend Claude builds for the **mobile / tablet APP**, with the exact API endpoints (post-resync) it consumes. **Backend is already implemented** — this is a build list, not a design.
+>
+> **Platform**: mobile + tablet APP (recommended stack: React Native + Expo + TypeScript; or Flutter; whichever the FE Claude prefers). Optimised for touch, designed primarily for **tablet on the production floor** with phone support as a secondary form factor. No desktop-first design.
+>
+> **Networking**: Tanstack Query (RN) or equivalent caching layer; Bearer JWT in `Authorization` header (same auth as existing chandra admin); offline-tolerant where possible (queue mutations, keep last-loaded list visible while refreshing). All routes admin-only.
+>
+> **Charts**: Victory Native / RN-charts / RN-svg-charts — any chart lib that works on RN. (If FE Claude picks a PWA/web-app instead, Recharts is fine.)
+>
+> 26 screens total, organized into 8 areas. Everything's wired to a live backend.
+
+### 14.0 Shell / Cross-cutting
+
+#### Screen: App Shell
+- **What:** the production-planner is a standalone mobile/tablet app. After admin login (reusing chandra's `/admin/auth` JWT flow), the user lands on the **Production Home Dashboard**.
+- **Navigation pattern**:
+  - **Tablet (primary)**: persistent left drawer with the 8 areas (Home / Imports / Tracking / Planning / Inventory / Material Loss / Alerts / Analytics / Settings); content fills the rest. Detail screens slide in from the right.
+  - **Phone**: bottom tab bar with the 5 most-used areas (Home, Tracking, Inventory, Alerts, More). "More" opens a sheet with Imports, Planning, Material Loss, Analytics, Settings. Detail screens push as a stack.
+- **Alerts badge**: count of open critical alerts shown on the Alerts tab/drawer-item. Tapping it opens the Alerts Inbox.
+- **Background refresh**: poll `GET /admin/production/alerts?status=open&severity=critical&limit=10` every 60s while the app is foregrounded; surface new critical alerts as an in-app toast / banner. (Optional: register a push token endpoint later — out of v1.)
+- **Date formatting**: dayjs/luxon everywhere, with relative-time hints ("3 days late", "5h ago").
+- **Confirmation modals / action sheets** for destructive actions (delete stage, cancel PO, soft-delete diamond SKU). Always two-step on touch (no accidental swipes).
+- **Pull-to-refresh** on every list/dashboard.
+
+---
+
+### 14.1 Imports (3 screens)
+
+#### Screen: Upload Orders
+- **Purpose**: upload Order `.xlsx` (GatiSOFT export)
+- **Components**:
+  - Large primary button: **"Pick file from device"** (uses RN's document picker / `expo-document-picker` → accepts `.xlsx`/`.xls`/`.csv`, 25 MB cap)
+  - Selected file card showing name + size + a "Change file" link
+  - Optional **preview** (parse first 10 rows on device with a JS xlsx lib; show expected JobCard count from `(OrderNoWithoutSrNo, OrderItemSrNo)` groupings)
+  - Big **"Upload"** primary action button (sticky bottom)
+  - Progress bar / spinner while uploading
+  - Result sheet showing `inserted` / `updated` / `skipped` / `errored` counts + a tap-target to open the Import Run Detail
+- **APIs**: `POST /admin/production/imports/gati-orders` (multipart `file`)
+- **On success**: navigate to Import Run Detail with the returned `run._id`.
+
+#### Screen: Upload WIP
+- Same shape as Upload Orders. Additionally surfaces **unmapped stage columns** from `run.unmappedColumns[]` as warning chips with a CTA button linking to **Settings → Column Maps** to fix them.
+- Post-upload toast: "Baselines + alerts refreshing in the background."
+- **APIs**: `POST /admin/production/imports/gati-wip`
+
+#### Screen: Import History
+- **Components**: filterable table — date, file type (`orders`/`wip`), status pill (`pending`/`processing`/`complete`/`failed`), uploader, counts (inserted/updated/errored). Pagination.
+- Click a row → Import Run Detail.
+- **APIs**: `GET /admin/production/imports/runs?fileType=&status=&limit=&skip=`
+
+#### Screen: Import Run Detail
+- **Components**: header (file name, time, status), counts dashboard, **error rows table** (`rowErrors[]` with `row`, `reason`, expandable `raw`), **unmapped columns chips**, "Re-upload" CTA (links to the upload page).
+- **APIs**: `GET /admin/production/imports/runs/:id`
+
+---
+
+### 14.2 Tracking (4 screens)
+
+#### Screen: Production Home Dashboard
+- **Purpose**: at-a-glance state
+- **Components**:
+  - KPI cards: open JobCards, late JobCards, today's last import status, critical alerts count
+  - Capacity gauge (current month load %)
+  - Top 3 bottleneck stages
+  - Recent alerts list (last 10)
+  - Quick actions: Upload Orders / Upload WIP / Run Capacity Check
+- **APIs**: `GET /admin/production/dashboards/capacity`, `GET /admin/production/dashboards/analytics`, `GET /admin/production/alerts?status=open&severity=critical&limit=10`
+
+#### Screen: Orders Tracking (primary tracking view)
+- **Purpose**: order-grouped operations hub — one **card** per `OrderNoWithoutSrNo`
+- **Layout**: FlatList of order cards. Each card is tap-able and shows:
+  - **Top row**: `orderNumber` (mono), priority badge, status pill, lateness chip if `worstLatenessDays > 0`
+  - **Middle**: `customerCode`, `expectedDeliveryAt` formatted + relative ("in 3 days" / "2 days overdue")
+  - **Progress bar**: completed / total
+  - **Stage distribution chips**: horizontally-scrollable strip of stage chips with qty (e.g. `CASTING 9`, `FILING 12`, `SETTING 15`)
+  - **Footer counts**: `X pieces • Y qty • Z late`
+  - **Card border / left bar color**: green (on track), yellow (at risk), red (late)
+- **Top filter bar**: chip-style toggles for `Status`, `Priority`, `Late only`; tap a filter chip → opens a bottom-sheet picker. Search field for `orderNumber` or `customerCode` substring.
+- **Long-press card** → action sheet with "Change priority for whole order"
+- **APIs**: `GET /admin/production/dashboards/orders?status=&customerCode=&priority=&deliveryBefore=&isLate=`
+- **Tap card** → Order Detail
+
+#### Screen: Order Detail (drill-in)
+- **Purpose**: every line item (JobCard) for one order
+- **Layout (scroll view)**:
+  - **Sticky header card**: order#, customer, delivery, total pieces/qty, completed qty, status pill, priority badge
+  - **Aggregate progress bar**
+  - **Stage distribution bar chart** (horizontal stacked bar — qty per stage)
+  - **Pieces section**: a list of JobCard cards (one per piece), each showing `gatiPieceCode` (mono), `styleNo` + `size`, `totalQty`, stage chips, days-in-current-stage, lateness badge, status pill
+  - **In-order filter chips**: "All / Late only / At stage X"
+- **APIs**: `GET /admin/production/dashboards/orders/:orderNumber`
+- **Tap piece card** → JobCard Detail (via `_id`)
+
+#### Screen: JobCard Detail
+- **Purpose**: drill into one piece
+- **Layout (vertical scroll)**:
+  - **Sticky header card**: `gatiPieceCode` (mono, large), status pill, priority badge, expected delivery + relative-time
+  - **Tabs (segmented control)**: `Overview` / `Timeline` / `Materials`
+  - **Overview tab**:
+    - Diamond specs accordion (multiple specs supported — one block per spec with gSize/sieve/mm/pointer/stones)
+    - Metal info card (`metalType`, weight)
+    - Findings card with toggle switch for `findingsReceived` (calls PUT)
+    - Current `currentStageDistribution` as chips
+  - **Timeline tab**: vertical list of StageMovements (one card per movement) — entered/exited each (stage, cell), durations, qcResult badge, weightIn/Out, stonesIn/Out
+  - **Materials tab**: material-loss summary (gold + stones), allocations list, metal-ledger entries
+- **Floating action button (FAB)** opens an action sheet with: "Change priority", "Allocate stones", "Consume / Release allocation", "Add metal-ledger entry"
+- **APIs**:
+  - `GET /admin/production/job-cards/:id` (or `.../by-code?code=`)
+  - `GET /admin/production/job-cards/:id/movements`
+  - `GET /admin/production/material-loss/by-job-card/:id`
+  - `GET /admin/production/inventory/allocations/by-job-card/:id`
+  - `GET /admin/production/inventory/metal-ledger/by-job-card/:id`
+  - `PUT /admin/production/job-cards/:id/findings`
+  - `PUT /admin/production/job-cards/:id/priority`
+  - `POST /admin/production/inventory/allocations`
+  - `POST /admin/production/inventory/allocations/:allocationId/consume|release`
+  - `POST /admin/production/inventory/metal-ledger`
+
+#### Screen: All Pieces (advanced flat view)
+- **Purpose**: cross-order filtering — e.g. "every piece stuck at SETTING regardless of order"
+- **Layout**: filter sheet (stage, cell, customer, priority, delivery, lateness, order#) + flat scrollable list of compact JobCard rows (gatiPieceCode, order#, styleNo, stage chips, days-in-stage, status). Pull-to-refresh + infinite scroll for pagination.
+- **APIs**: `GET /admin/production/job-cards?status=&customerCode=&priority=&orderNumber=&deliveryBefore=&isLate=&limit=&skip=`
+- **Tap row** → JobCard Detail
+
+---
+
+### 14.3 Planning (3 screens)
+
+#### Screen: Capacity Dashboard
+- **Purpose**: live capacity picture
+- **Layout (scroll)**:
+  - **Top**: month-load gauge (circular % capacity consumed this month)
+  - **Bottleneck banner** with the top 3 bottleneck stages as red-tinted chips
+  - **Per-stage list of cards**: each card shows stageCode, queueUnits, capacityPerDay, queueDays (with progress bar), activeCells count, `source` (data/expected badge)
+- **Floating "Refresh baselines"** button (icon + label) → `POST /planning/baselines/recompute`, shows a spinner during recompute
+- **APIs**: `GET /admin/production/dashboards/capacity`, `POST /admin/production/planning/baselines/recompute`
+
+#### Screen: New Order Calculator
+- **Purpose**: "can we accept this order?"
+- **Layout (form on top, result below; scrolls together)**:
+  - **Form section** with large touch-friendly inputs: `totalQty` (numeric stepper), `totalStones` (numeric), `totalGrams` (numeric), `expectedDeliveryAt` (date picker), `priority` (segmented control: normal / urgent / critical), `requiresStages[]` / `excludeStages[]` (chip multi-select sheets)
+  - **Sticky "Calculate"** button at the bottom while form is dirty
+  - **Result section** appears after submit: `estimatedCompletionAt` (large date), `leadTimeDays`, `bottleneckStage` chip, **capacityStatus pill** (color-coded: WITHIN_RANGE green / AT_LIMIT yellow / NEEDS_OVERTIME orange / NEEDS_HIRE red), `overtimeHoursNeeded`, on-time probability bar, **critical path** as a horizontal chip strip, per-stage breakdown list, warnings list
+- **APIs**: `POST /admin/production/planning/check`
+
+#### Screen: What-If Simulator
+- **Purpose**: scenario planning
+- **Layout**:
+  - **Tablet**: two-pane — scenario builder (left) and impact (right)
+  - **Phone**: single column — builder section above, "Simulate" button, then impact section below
+  - **Scenario builder**: per-stage extra-cell steppers (`addCellsByStage`), overtime hrs/day slider, add hypothetical new order (sub-form opens as bottom sheet), reprioritize multi-select (sheet)
+  - **Impact section**: horizontal bar chart of completion-date deltas per JobCard, lists of orders saved / slipping, cost delta + notes, stage-load comparison list
+  - **Save / load named scenarios** via a top-right "Scenarios" menu icon
+- **APIs**: `POST /admin/production/what-if/simulate`, `GET/POST/DELETE /admin/production/what-if/scenarios[/:id]`
+
+---
+
+### 14.4 Inventory (5 screens)
+
+#### Screen: Diamond Master
+- **Purpose**: manage Diamond SKUs (auto-seeded by Order imports; admin fills in cost/threshold/lead/supplier)
+- **Layout**: search bar at top (q param), filter chips (active/inactive, gSize range), list of SKU cards. Each card shows code (mono), gSize / sieve / mm, on-hand badge, supplier. Tap → edit sheet with form fields. FAB "+" → manual create sheet.
+- **APIs**: `GET /admin/production/inventory/diamonds?active=&q=&limit=&skip=`, `GET/PUT/DELETE /admin/production/inventory/diamonds/by-code?code=`, `POST /admin/production/inventory/diamonds`
+
+#### Screen: Requirements vs Stock (Flow 3 main view)
+- **Purpose**: the heart of inventory planning
+- **Layout**: filter chips at top (`All` / `Shortages only` / `Low only`), list of SKU rows sorted by severity. Each row card: code, `available` vs `required` with a visual gap bar, `delta` (colored red if negative), status pill (`ok`/`low`/`shortage`/`critical`), `reorderSuggestedQty` chip. **Sticky bottom CTA: "Generate POs from shortages"** that shows a confirm sheet.
+- **APIs**: `GET /admin/production/inventory/requirements?status=`, `POST /admin/production/purchase-orders/generate-from-shortages`
+
+#### Screen: Diamond Ledger (per SKU)
+- **Purpose**: audit trail for one SKU
+- **Layout**: SKU picker at top (searchable bottom-sheet — code uses `|` so display is "gSize · sieve · mm"). Below: a vertical timeline of ledger entries, newest first — each entry as a card showing date, movement type icon, signed qty (colored), jobCard chip, reference, notes. **Running balance** shown on each card. FAB "+" → "Add entry" sheet (GRN / adjustment / return / write-off).
+- **APIs**: `GET /admin/production/inventory/diamonds-ledger/by-code?code=&limit=`, `POST /admin/production/inventory/ledger`
+
+#### Screen: Metal Ledger
+- **Purpose**: per-JobCard metal issuance / return tracking
+- **Layout**: JobCard picker (gatiPieceCode searchable bottom-sheet). Below: ledger entries list (date, metalType chip, movement icon, signed weight colored, stage/cell, notes). `netGrams` summary card at top. FAB "+" → Add Entry sheet.
+- **APIs**: `GET /admin/production/inventory/metal-ledger/by-job-card/:id`, `POST /admin/production/inventory/metal-ledger`
+
+#### Screen: Purchase Orders
+- **Purpose**: auto-PO inbox + manual create/edit/approve/cancel
+- **Layout**: status segmented control at top (`Drafts` / `Approved` / `Sent` / `Received` / `Cancelled`), list of PO cards (poNumber, supplier, lineCount, totalCost ₹, createdAt). Tap → PO Detail screen (full-width on phone, modal on tablet) with editable lines while in draft, "Approve" / "Cancel" sticky bottom buttons. FAB "+" → manual create sheet.
+- **APIs**: `GET /admin/production/purchase-orders?status=`, `GET/PUT /admin/production/purchase-orders/:id`, `POST /admin/production/purchase-orders` (manual create), `POST .../:id/approve`, `POST .../:id/cancel`, `POST /admin/production/purchase-orders/generate-from-shortages`
+
+---
+
+### 14.5 Material Loss (1 screen, 4 tabs)
+
+#### Screen: Material Loss
+- **Purpose**: gold / stone loss accounting
+- **Tabs + components**:
+  - **Summary** — date-range picker, totals (issued/returned/final-piece, gold-loss grams + %, stones in/out + loss, completed JobCard count); bar chart of issued vs returned vs final
+  - **By Stage** — horizontal bar chart of gold-loss % per stage, drill table
+  - **By Cell** — same shape, useful for "is Filing C1 worse than C2?"
+  - **By JobCard** — table of the top lossiest (call by-job-card per row), click → JobCard Detail
+- **APIs**: `GET /admin/production/material-loss/summary?from=&to=`, `/by-stage`, `/by-cell`, `/by-job-card/:id`
+
+---
+
+### 14.6 Alerts (1 screen)
+
+#### Screen: Alerts Inbox
+- **Components**: filter bar (severity, type, subjectType, status `open`/`acknowledged`/`resolved`), table sorted critical-first, action buttons (acknowledge, resolve), click row → linked subject view (JobCard / Order / Diamond / Stage / Cell — route to the appropriate detail page), **"Run scan"** button to manually trigger the engine
+- **Alert types displayed** (16 from §7): `PIECE_STUCK`, `PIECE_SEVERELY_STUCK`, `DELIVERY_AT_RISK`, `DELIVERY_OVERDUE`, `QC_REWORK`, `BLOCKER_FORMED`, `DIAMOND_LOW_STOCK`, `DIAMOND_SHORTAGE`, `DIAMOND_IMMINENT_SHORTAGE`, `MATERIAL_LOSS_SPIKE`, `BASELINE_DRIFT_SLOW/FAST`, `STAGE_STALE`, `ZOMBIE_ORDER`, `MASS_REWORK`, `MONTH_LOAD_HIGH`
+- **APIs**: `GET /admin/production/alerts?severity=&type=&status=&limit=&skip=`, `POST /admin/production/alerts/:id/acknowledge`, `POST /admin/production/alerts/:id/resolve`, `POST /admin/production/alerts/run`
+
+---
+
+### 14.7 Analytics (1 screen)
+
+#### Screen: Analytics
+- **Purpose**: trends + KPIs
+- **Components**: date range picker; KPI cards (on-time delivery %, avg cycle days, total gold loss this period, total completed); cycle-time-per-stage horizontal bar chart; daily-movements trend line chart; anomaly counts by type pie/bar; material-loss summary tiles
+- **APIs**: `GET /admin/production/dashboards/analytics?from=&to=`
+
+---
+
+### 14.8 Settings (4 screens)
+
+#### Screen: Settings → Stages
+- **Components**: table (code, name, expectedHours, dependencies chips, parallelGroup, unitOfWork, isOptional, isTerminal, displayOrder, active); drag to reorder (updates `displayOrder`); dependency-graph visualization; add/edit/delete (safe — can't delete a stage in use)
+- **APIs**: `GET/POST /admin/production/stages`, `GET/PUT/DELETE /admin/production/stages/:code`
+
+#### Screen: Settings → Cells & Seats
+- **Components**: Cells table with `stageCodes[]` multi-select (many-to-many); each cell row expandable to its Seats; visual cell map (optional)
+- **APIs**: `GET/POST /admin/production/cells`, `GET/PUT/DELETE /admin/production/cells/:code`, `GET /admin/production/seats?cellCode=`, `POST /admin/production/seats`, `GET/PUT/DELETE /admin/production/seats/:code`
+
+#### Screen: Settings → Calendar
+- **Components**: shifts CRUD (name, start/end times), `weekendDays` multi-select (0=Sun..6=Sat), holiday date picker, `defaultDailyHours` numeric
+- **APIs**: `GET/PUT /admin/production/calendar`
+
+#### Screen: Settings → Column Maps (most important config screen)
+- **Purpose**: admin maps GatiSOFT's column headers to the system's stage/cell codes
+- **Components**: two tabs (`Orders Columns`, `WIP Columns`); WIP tab table (`rawColumn` → stageCode autocomplete from StageDefinitions → cellCode autocomplete from Cells); aliases section (editable lists for diamond/metal/finding `RawAliasName` aliases); "Detect new columns" button — re-parses the most recent failed import and surfaces unmapped columns
+- **APIs**: `GET/PUT /admin/production/column-maps/orders`, `GET/PUT /admin/production/column-maps/wip`
+
+---
+
+### 14.9 Summary table
+
+| # | Screen | Area | Primary API |
+|---|---|---|---|
+| 1 | App Shell + Alerts drawer | Shell | `GET /alerts?status=open&severity=critical` |
+| 2 | Upload Orders | Imports | `POST /imports/gati-orders` |
+| 3 | Upload WIP | Imports | `POST /imports/gati-wip` |
+| 4 | Import History | Imports | `GET /imports/runs` |
+| 5 | Import Run Detail | Imports | `GET /imports/runs/:id` |
+| 6 | Production Home Dashboard | Tracking | `GET /dashboards/capacity` + `/analytics` |
+| 7 | Orders Tracking (primary) | Tracking | `GET /dashboards/orders` |
+| 8 | Order Detail | Tracking | `GET /dashboards/orders/:orderNumber` |
+| 9 | JobCard Detail | Tracking | `GET /job-cards/:id` + movements + loss + alloc |
+| 10 | All Pieces (advanced) | Tracking | `GET /job-cards?...` |
+| 11 | Capacity Dashboard | Planning | `GET /dashboards/capacity` |
+| 12 | New Order Calculator | Planning | `POST /planning/check` |
+| 13 | What-If Simulator | Planning | `POST /what-if/simulate` |
+| 14 | Diamond Master | Inventory | `GET /inventory/diamonds` |
+| 15 | Requirements vs Stock | Inventory | `GET /inventory/requirements` |
+| 16 | Diamond Ledger (per SKU) | Inventory | `GET /inventory/diamonds-ledger/by-code` |
+| 17 | Metal Ledger | Inventory | `GET /inventory/metal-ledger/by-job-card/:id` |
+| 18 | Purchase Orders | Inventory | `GET /purchase-orders` |
+| 19 | Material Loss (4 tabs) | Loss | `GET /material-loss/*` |
+| 20 | Alerts Inbox | Alerts | `GET /alerts` |
+| 21 | Analytics | Analytics | `GET /dashboards/analytics` |
+| 22 | Settings → Stages | Settings | `GET /stages` |
+| 23 | Settings → Cells & Seats | Settings | `GET /cells` + `/seats` |
+| 24 | Settings → Calendar | Settings | `GET /calendar` |
+| 25 | Settings → Column Maps | Settings | `GET /column-maps/:fileType` |
+
+**26 screens total** (App Shell + 25 content pages). Every API listed above is implemented and TypeScript-clean in the backend; FE Claude builds against the actual `/admin/production` surface documented in §8.
+
+### 14.10 Cross-cutting requirements (APP)
+
+- **Form factor**: **tablet-first** (primary), phone (secondary). No desktop layout. Adaptive layout breakpoint at ~768pt — tablet shows side-drawer + two-pane detail; phone uses bottom tabs + stacked detail.
+- **Touch ergonomics**: minimum 44pt tap targets; large primary actions; bottom sheets for selects/multi-pickers; pull-to-refresh on every list.
+- **Empty / loading / error states** for every list screen: empty state with the relevant CTA ("Upload first Excel", "No alerts open", etc.), shimmering skeleton cards while loading, error banner with a "Retry" button.
+- **Pagination**: all list endpoints accept `limit` and `skip`; default to 50 items, **infinite scroll** as the user reaches the bottom.
+- **Auth**: redirect to the login screen on 401. JWT stored in **secure storage** (Keychain / Keystore / `expo-secure-store`), never in plain `AsyncStorage`.
+- **Networking**: background fetch + auto-retry on transient failures; visible "Offline — last synced 5m ago" banner if the network drops; queued mutations replay when connectivity returns.
+- **Polling**: keep it light — only the alerts background check polls on a 60s timer while foregrounded. Other screens refresh on focus + pull-to-refresh + explicit refresh.
+- **Identifier handling**: never put `gatiPieceCode` or Diamond `code` in URL paths — use `by-code?code=` or the Mongo `_id` route.
+- **Form validation client-side** for the planning calculator and PO editor (positive numbers, valid dates) — inline error text, not modal alerts.
+- **File uploads**: use the platform's document picker (`expo-document-picker` / RN equivalent). The two uploaded files in v1 (Order `.xlsx`, WIP `.xlsx`) **are never stored anywhere** — parsed in memory on the backend and discarded immediately.
+- **No image upload / attachments anywhere in v1** — `StageMovement.attachments` is not exposed to the UI.
+- **Numeric input**: always use numeric keyboards (`keyboardType="number-pad"` / `"decimal-pad"`) for qty / weight / pointer / price fields.
+- **Accessibility**: respect system text-size; high-contrast color tokens for status pills; VoiceOver / TalkBack labels on icon-only buttons.

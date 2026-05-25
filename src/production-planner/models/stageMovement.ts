@@ -21,7 +21,6 @@ export interface StageMovementDocument extends Document {
   stonesIn?: number;
   stonesOut?: number;
   notes?: string;
-  attachments: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -46,7 +45,6 @@ const StageMovementSchema = new Schema<StageMovementDocument>(
     stonesIn: { type: Number, min: 0 },
     stonesOut: { type: Number, min: 0 },
     notes: { type: String, trim: true },
-    attachments: { type: [String], default: [] },
   },
   { timestamps: true }
 );
