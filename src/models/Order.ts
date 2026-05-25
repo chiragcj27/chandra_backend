@@ -33,6 +33,14 @@ export interface OrderItem {
   meta?: Record<string, unknown>;
 }
 
+export interface OrderInvoice {
+  _id: Types.ObjectId;
+  key: string;
+  filename: string;
+  url: string;
+  uploadedAt: Date;
+}
+
 export interface OrderDocument extends Document {
   orderNumber: string;
   clientId: string;
@@ -47,6 +55,7 @@ export interface OrderDocument extends Document {
   totalAmount?: number;
   orderMeta?: Record<string, unknown>;
   timeline: OrderTimelineEntry[];
+  invoices: OrderInvoice[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -79,6 +88,16 @@ const OrderItemSchema = new Schema<OrderItem>(
   { _id: false }
 );
 
+const OrderInvoiceSchema = new Schema<OrderInvoice>(
+  {
+    key: { type: String, required: true, trim: true },
+    filename: { type: String, required: true, trim: true },
+    url: { type: String, required: true, trim: true },
+    uploadedAt: { type: Date, required: true, default: Date.now },
+  },
+  { _id: true }
+);
+
 const OrderSchema = new Schema<OrderDocument>(
   {
     orderNumber: { type: String, required: true, unique: true, index: true },
@@ -94,6 +113,7 @@ const OrderSchema = new Schema<OrderDocument>(
     totalAmount: { type: Number, min: 0 },
     orderMeta: { type: Schema.Types.Mixed },
     timeline: { type: [OrderTimelineEntrySchema], default: [] },
+    invoices: { type: [OrderInvoiceSchema], default: [] },
   },
   { timestamps: true, strict: false }
 );
