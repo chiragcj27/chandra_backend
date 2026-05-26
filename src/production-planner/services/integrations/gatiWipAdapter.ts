@@ -50,6 +50,8 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     const columnMap = await GatiColumnMap.findOne({ fileType: "wip", active: true });
     const stageCellByColumn = new Map<string, MappedStageCell>();
     for (const entry of (columnMap?.wipColumns ?? []) as GatiWipColumnEntry[]) {
+      // Skip pending entries (no stageCode/cellCode yet) — they count as unmapped
+      if (!entry.stageCode || !entry.cellCode) continue;
       stageCellByColumn.set(entry.rawColumn.trim(), {
         stageCode: entry.stageCode,
         cellCode: entry.cellCode,
@@ -148,6 +150,30 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
         const reason = err instanceof Error ? err.message : "Unknown error";
         rowErrors.push({ row: rowIndex, reason: `${pieceCode}: ${reason}` });
       }
+    }
+
+    // ── Auto-discover: persist newly-seen stage columns (with blank codes) so
+    //    the admin can fill them in on the Column Maps screen.
+    if (unmappedColumns.size > 0) {
+      let targetMap = columnMap;
+      if (!targetMap) {
+        targetMap = await GatiColumnMap.create({ fileType: "wip", active: true });
+      }
+      const existingRaws = new Set(
+        (targetMap.wipColumns as GatiWipColumnEntry[]).map((c) => c.rawColumn.trim())
+      );
+      let mapChanged = false;
+      for (const col of unmappedColumns) {
+        if (!existingRaws.has(col.trim())) {
+          (targetMap.wipColumns as GatiWipColumnEntry[]).push({
+            rawColumn: col.trim(),
+            stageCode: "",
+            cellCode: "",
+          });
+          mapChanged = true;
+        }
+      }
+      if (mapChanged) await targetMap.save();
     }
 
     run.inserted = 0;

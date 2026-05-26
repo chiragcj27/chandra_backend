@@ -37,11 +37,27 @@ export function parseWorkbookFromBuffer(buf: Buffer, sheetName?: string): Parsed
     return { headers: [], rows: [], rowCount: 0 };
   }
 
-  const rawHeaders = aoa[0] ?? [];
+  // Auto-detect the real header row.
+  // GatiSOFT WIP exports place a "Grand Total" summary row above the real column
+  // headers (e.g. row 0 = [null, null, null, "Grand Total"], row 1 = ["Book Name",
+  // "OrderNo+SrNo", ...]).  We scan the first 5 rows and use the first one that
+  // contains at least 2 non-blank cells — that row is always the real header.
+  let headerIdx = 0;
+  for (let i = 0; i < Math.min(aoa.length, 5); i++) {
+    const nonEmpty = (aoa[i] ?? []).filter(
+      (h) => h != null && String(h).trim() !== ""
+    ).length;
+    if (nonEmpty >= 2) {
+      headerIdx = i;
+      break;
+    }
+  }
+
+  const rawHeaders = aoa[headerIdx] ?? [];
   const headers: string[] = rawHeaders.map((h) => (typeof h === "string" ? h.trim() : String(h ?? "")));
 
   const rows: Record<string, unknown>[] = [];
-  for (let i = 1; i < aoa.length; i++) {
+  for (let i = headerIdx + 1; i < aoa.length; i++) {
     const row = aoa[i] ?? [];
     const obj: Record<string, unknown> = {};
     for (let c = 0; c < headers.length; c++) {

@@ -1,0 +1,19 @@
+
+> chandra_backend@1.0.0 start
+> node scripts/start.cjs
+
+[dotenv@17.3.1] injecting env (7) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🛠️  run anywhere with `dotenvx run -- yourcommand`
+Connected to MongoDB
+(node:20204) [MONGOOSE] Warning: mongoose: Duplicate schema index on {"styleNo":1} for model "Product". This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[production-planner] schedulers running: baselines every 360m, alerts every 15m
+Server listening on port 3000
+[production-planner] recomputeBaselines (startup) ok in 7ms { stages: 0 }
+[production-planner] runAlertRules (startup) ok in 128ms { scanned: 36, raised: 0, skipped: 78, raisedTypes: {} }
+[production-planner] runAlertRules ok in 121ms { scanned: 36, raised: 0, skipped: 78, raisedTypes: {} }
+[production-planner] runAlertRules ok in 1748ms { scanned: 36, raised: 0, skipped: 87, raisedTypes: {} }
+[production-planner] runAlertRules ok in 363ms { scanned: 36, raised: 0, skipped: 87, raisedTypes: {} }
+[production-planner] runAlertRules ok in 243ms { scanned: 36, raised: 0, skipped: 87, raisedTypes: {} }
+[production-planner] runAlertRules ok in 143ms { scanned: 36, raised: 0, skipped: 87, raisedTypes: {} }
+[production-planner] runAlertRules ok in 112ms { scanned: 36, raised: 0, skipped: 87, raisedTypes: {} }

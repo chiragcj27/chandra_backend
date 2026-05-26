@@ -54,7 +54,8 @@ function asWipColumns(x: unknown): GatiWipColumnEntry[] | undefined {
     const rawColumn = typeof obj.rawColumn === "string" ? obj.rawColumn.trim() : "";
     const stageCode = typeof obj.stageCode === "string" ? obj.stageCode.trim().toUpperCase() : "";
     const cellCode = typeof obj.cellCode === "string" ? obj.cellCode.trim().toUpperCase() : "";
-    if (rawColumn && stageCode && cellCode) {
+    // Only rawColumn is required — stageCode/cellCode may be blank for pending entries
+    if (rawColumn) {
       out.push({ rawColumn, stageCode, cellCode });
     }
   }
