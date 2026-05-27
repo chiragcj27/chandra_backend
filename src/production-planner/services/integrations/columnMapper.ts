@@ -51,10 +51,8 @@ export function toStr(v: unknown): string | undefined {
 export function parseGatiDate(s: unknown): Date | null {
   if (s instanceof Date) return Number.isFinite(s.getTime()) ? s : null;
   if (typeof s === "number") {
-    // Excel can give us a date as a serial number. xlsx with cellDates:false leaves
-    // those as numbers; but we read with raw:false so most dates come back as strings.
-    // Treat numbers as Unix ms for safety.
-    const d = new Date(s);
+    // Excel serial date number (days since 1899-12-30). Convert to JS Date.
+    const d = new Date((s - 25569) * 86400 * 1000);
     return Number.isFinite(d.getTime()) ? d : null;
   }
   const str = toStr(s);
