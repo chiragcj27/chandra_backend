@@ -5,7 +5,16 @@ import { METAL_LEDGER_TYPES, type MetalLedgerType } from "../types";
 export interface MetalLedgerDocument extends Document {
   metalType: string;
   movementType: MetalLedgerType;
-  /** Signed grams. Issues negative, returns positive. */
+  /**
+   * Signed grams. Convention (matches frontend UX):
+   *   issue      → positive  (+50.00g  — metal going to the production floor)
+   *   return     → negative  (−12.00g  — scrap coming back to the vault)
+   *   loss       → negative  (−0.10g   — irrecoverable dust / breakage)
+   *   adjustment → positive or negative (admin-supplied correction)
+   *
+   * Material-loss formulas use $abs per movementType, so the sign on stored
+   * documents is not load-bearing for calculations — only for display.
+   */
   weightGrams: number;
   jobCardId?: Types.ObjectId;
   gatiPieceCode?: string;

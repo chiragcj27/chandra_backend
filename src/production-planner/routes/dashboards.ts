@@ -138,6 +138,9 @@ router.get("/dashboards/orders", requireAuth, requireRole("admin"), async (req, 
     const priority = asString(req.query.priority);
     const deliveryBefore = asDate(req.query.deliveryBefore);
     const isLate = req.query.isLate === "true" || req.query.isLate === "1";
+    const search = asString(req.query.search);
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 100), 1), 500);
+    const skip = Math.max(Number(req.query.skip ?? 0), 0);
 
     if (customerCode) filter.customerCode = customerCode;
     if (priority) filter.priority = priority;
@@ -146,6 +149,13 @@ router.get("/dashboards/orders", requireAuth, requireRole("admin"), async (req, 
     if (isLate) {
       filter.expectedDeliveryAt = { ...((filter.expectedDeliveryAt as object | undefined) ?? {}), $lt: new Date() };
       filter.status = { $nin: ["completed", "cancelled"] };
+    }
+    // search matches against orderNumber or customerCode (case-insensitive)
+    if (search) {
+      filter.$or = [
+        { orderNumber: { $regex: search, $options: "i" } },
+        { customerCode: { $regex: search, $options: "i" } },
+      ];
     }
 
     // Fetch all matching JobCards; group by orderNumber in-memory.
@@ -169,7 +179,10 @@ router.get("/dashboards/orders", requireAuth, requireRole("admin"), async (req, 
       return ad - bd;
     });
 
-    return res.status(200).json({ items: rollups, total: rollups.length });
+    const total = rollups.length;
+    const paged = rollups.slice(skip, skip + limit);
+
+    return res.status(200).json({ items: paged, total });
   } catch {
     return res.status(500).json({ error: "Server error" });
   }

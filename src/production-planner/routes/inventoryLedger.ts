@@ -4,6 +4,7 @@ import { Types } from "mongoose";
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import {
   addLedgerEntry,
+  getLedgerStats,
   listLedgerForCode,
 } from "../services/inventory/inventoryLedgerService";
 import { DIAMOND_LEDGER_TYPES, type DiamondLedgerType } from "../types";
@@ -73,8 +74,11 @@ router.get(
     if (!code) return res.status(400).json({ error: "code is required" });
     try {
       const limit = asNumber(req.query.limit) ?? 200;
-      const entries = await listLedgerForCode(code, limit);
-      return res.status(200).json({ entries });
+      const [entries, stats] = await Promise.all([
+        listLedgerForCode(code, limit),
+        getLedgerStats(code),
+      ]);
+      return res.status(200).json({ entries, stats });
     } catch {
       return res.status(500).json({ error: "Server error" });
     }
@@ -91,8 +95,11 @@ router.get(
     if (!code) return res.status(400).json({ error: "code query param is required" });
     try {
       const limit = asNumber(req.query.limit) ?? 200;
-      const entries = await listLedgerForCode(code, limit);
-      return res.status(200).json({ entries });
+      const [entries, stats] = await Promise.all([
+        listLedgerForCode(code, limit),
+        getLedgerStats(code),
+      ]);
+      return res.status(200).json({ entries, stats });
     } catch {
       return res.status(500).json({ error: "Server error" });
     }

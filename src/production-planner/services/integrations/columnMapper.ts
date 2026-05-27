@@ -75,6 +75,17 @@ export function parseGatiDate(s: unknown): Date | null {
     return Number.isFinite(d.getTime()) ? d : null;
   }
 
+  // `DD-MM-YYYY` or `DD/MM/YYYY` (GatiSOFT multi-sheet style, e.g. "22-04-2026")
+  const mDmy = str.match(/^(\d{1,2})[-](\d{1,2})[-](\d{4})$/);
+  if (mDmy) {
+    const day = Number(mDmy[1]);
+    const month = Number(mDmy[2]);
+    const year = Number(mDmy[3]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const d = new Date(Date.UTC(year, month - 1, day));
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+
   return null;
 }
 
