@@ -9,6 +9,10 @@ import {
   closeMovements,
   openMovement,
 } from "../production/stageMovementService";
+import {
+  DEFAULT_ALIASES,
+  DEFAULT_WIP_COLUMNS,
+} from "../bootstrap/columnMapDefaults";
 import { parseWorkbookFromBuffer } from "./excelParser";
 import { toNumber, toStr } from "./columnMapper";
 
@@ -157,7 +161,14 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     if (unmappedColumns.size > 0) {
       let targetMap = columnMap;
       if (!targetMap) {
-        targetMap = await GatiColumnMap.create({ fileType: "wip", active: true });
+        targetMap = await GatiColumnMap.create({
+          fileType: "wip",
+          version: 1,
+          aliases: DEFAULT_ALIASES,
+          orderColumns: [],
+          wipColumns: DEFAULT_WIP_COLUMNS.map((c) => ({ ...c })),
+          active: true,
+        });
       }
       const existingRaws = new Set(
         (targetMap.wipColumns as GatiWipColumnEntry[]).map((c) => c.rawColumn.trim())
