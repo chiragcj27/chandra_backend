@@ -8,6 +8,17 @@ import type { StageDistributionEntry } from "../types";
 
 const router = Router();
 
+/**
+ * Guard: return `undefined` for nullish, invalid, or unreasonably old dates
+ * (before year 2000 — catches bad imports like 1970-01-01).
+ */
+function sanitizeDate(d: Date | null | undefined): Date | undefined {
+  if (d == null) return undefined;
+  if (!Number.isFinite(d.getTime())) return undefined;
+  if (d.getFullYear() < 2000) return undefined;
+  return d;
+}
+
 function asString(x: unknown): string | undefined {
   if (typeof x !== "string") return undefined;
   const t = x.trim();
@@ -61,11 +72,12 @@ function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
     else if (jc.status === "on_hold") onHold++;
     else if (jc.status === "planned") planned++;
 
-    if (jc.expectedDeliveryAt) {
-      if (!earliestDelivery || jc.expectedDeliveryAt < earliestDelivery) {
-        earliestDelivery = jc.expectedDeliveryAt;
+    const delDate = sanitizeDate(jc.expectedDeliveryAt);
+    if (delDate) {
+      if (!earliestDelivery || delDate < earliestDelivery) {
+        earliestDelivery = delDate;
       }
-      const days = (now.getTime() - jc.expectedDeliveryAt.getTime()) / 86_400_000;
+      const days = (now.getTime() - delDate.getTime()) / 86_400_000;
       if (days > 0 && jc.status !== "completed") {
         delayed++;
         if (days > worstLatenessDays) worstLatenessDays = days;
@@ -126,6 +138,9 @@ router.get("/dashboards/orders", requireAuth, requireRole("admin"), async (req, 
     const priority = asString(req.query.priority);
     const deliveryBefore = asDate(req.query.deliveryBefore);
     const isLate = req.query.isLate === "true" || req.query.isLate === "1";
+    const search = asString(req.query.search);
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 100), 1), 500);
+    const skip = Math.max(Number(req.query.skip ?? 0), 0);
 
     if (customerCode) filter.customerCode = customerCode;
     if (priority) filter.priority = priority;
@@ -134,6 +149,13 @@ router.get("/dashboards/orders", requireAuth, requireRole("admin"), async (req, 
     if (isLate) {
       filter.expectedDeliveryAt = { ...((filter.expectedDeliveryAt as object | undefined) ?? {}), $lt: new Date() };
       filter.status = { $nin: ["completed", "cancelled"] };
+    }
+    // search matches against orderNumber or customerCode (case-insensitive)
+    if (search) {
+      filter.$or = [
+        { orderNumber: { $regex: search, $options: "i" } },
+        { customerCode: { $regex: search, $options: "i" } },
+      ];
     }
 
     // Fetch all matching JobCards; group by orderNumber in-memory.
@@ -157,7 +179,10 @@ router.get("/dashboards/orders", requireAuth, requireRole("admin"), async (req, 
       return ad - bd;
     });
 
-    return res.status(200).json({ items: rollups, total: rollups.length });
+    const total = rollups.length;
+    const paged = rollups.slice(skip, skip + limit);
+
+    return res.status(200).json({ items: paged, total });
   } catch {
     return res.status(500).json({ error: "Server error" });
   }
@@ -187,8 +212,9 @@ router.get(
       for (const s of stages) expectedByStage.set(s.code, s.expectedDurationHours);
 
       const pieces = jobCards.map((jc) => {
-        const latenessDays = jc.expectedDeliveryAt
-          ? Math.max(0, (now.getTime() - jc.expectedDeliveryAt.getTime()) / 86_400_000)
+        const delDate = sanitizeDate(jc.expectedDeliveryAt);
+        const latenessDays = delDate
+          ? Math.max(0, (now.getTime() - delDate.getTime()) / 86_400_000)
           : 0;
         return {
           gatiPieceCode: jc.gatiPieceCode,
@@ -202,7 +228,7 @@ router.get(
           status: jc.status,
           priority: jc.priority,
           findingsReceived: jc.findingsReceived,
-          expectedDeliveryAt: jc.expectedDeliveryAt,
+          expectedDeliveryAt: delDate ?? null,
           currentStageDistribution: jc.currentStageDistribution,
           latenessDays: Math.round(latenessDays * 10) / 10,
           isLate: latenessDays > 0 && jc.status !== "completed",

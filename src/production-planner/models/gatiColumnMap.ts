@@ -55,8 +55,11 @@ const GatiOrderColumnEntrySchema = new Schema<GatiOrderColumnEntry>(
 const GatiWipColumnEntrySchema = new Schema<GatiWipColumnEntry>(
   {
     rawColumn: { type: String, required: true, trim: true },
-    stageCode: { type: String, required: true, trim: true, uppercase: true },
-    cellCode: { type: String, required: true, trim: true, uppercase: true },
+    // required:false + default:'' so "pending" entries (auto-discovered from an
+    // uploaded WIP file but not yet mapped by the admin) can be stored without
+    // a stage/cell code and shown in the Column Maps screen for the admin to fill in.
+    stageCode: { type: String, required: false, default: '', trim: true, uppercase: true },
+    cellCode:  { type: String, required: false, default: '', trim: true, uppercase: true },
   },
   { _id: false }
 );

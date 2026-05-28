@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import {
   getLossByCell,
   getLossByJobCard,
+  getLossByJobCards,
   getLossByStage,
   getLossSummary,
 } from "../services/inventory/materialLossService";
@@ -49,6 +50,16 @@ router.get("/material-loss/by-cell", requireAuth, requireRole("admin"), async (r
       from: asDate(req.query.from),
       to: asDate(req.query.to),
     });
+    return res.status(200).json({ items });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Server error";
+    return res.status(500).json({ error: message });
+  }
+});
+
+router.get("/material-loss/by-job-card", requireAuth, requireRole("admin"), async (_req, res) => {
+  try {
+    const items = await getLossByJobCards();
     return res.status(200).json({ items });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Server error";

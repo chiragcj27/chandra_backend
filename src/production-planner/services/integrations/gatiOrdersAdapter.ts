@@ -58,8 +58,9 @@ export async function ingestOrdersFile(
       columnMap = await GatiColumnMap.create({ fileType: "orders" });
     }
 
-    // Parse workbook
-    const parsed = parseWorkbookFromBuffer(input.buffer);
+    // Parse workbook — combine ALL sheets so GatiSOFT files that spread orders
+    // across multiple tabs (e.g. "Sheet" + "New Sheet") are fully imported.
+    const parsed = parseWorkbookFromBuffer(input.buffer, undefined, true);
     run.rowCount = parsed.rowCount;
 
     // Group rows by `${OrderNoWithoutSrNo}/${OrderItemSrNo}`.

@@ -363,8 +363,9 @@ Response: `[{ diamondCode, gSize, sieve, mm, onHand, allocated, available, requi
 **Tracking UI grouping:** the primary tracking view is **order-grouped** — list of orders (`OrderNoWithoutSrNo`), each row shows the order's aggregate state. Drilling into one order reveals all its line items (JobCards). The flat per-JobCard view is kept as an advanced filter, not the default.
 
 - `GET /admin/production/dashboards/orders?status=&customerCode=&priority=&deliveryBefore=&isLate=`
-  Returns **order-level rollups**: `[{ orderNumber, customerCode, expectedDeliveryAt (earliest among pieces), totalQty, totalPieces (= JobCard count), inProgressCount, completedCount, delayedCount, stageDistribution[] (rolled-up qty by stage), worstLatenessDays, priority, status }]`.
-- `GET /admin/production/dashboards/orders/:orderNumber` — drill-in: order header + array of all JobCards in the order with their `currentStageDistribution`, time-in-stage, lateness flags.
+  Returns **order-level rollups**: `[{ orderNumber, customerCode, expectedDeliveryAt (earliest among pieces, null if all invalid), totalQty, totalPieces (= JobCard count), inProgressCount, completedCount, delayedCount, stageDistribution[] (rolled-up qty by stage), worstLatenessDays, priority, status }]`.
+  **Date guard:** `expectedDeliveryAt` is sanitized — dates before year 2000 (e.g. bad imports showing 1970-01-01) or null/invalid values are treated as `undefined`/`null`, preventing corrupt dates from reaching the frontend.
+- `GET /admin/production/dashboards/orders/:orderNumber` — drill-in: order header + array of all JobCards in the order with their `currentStageDistribution`, time-in-stage, lateness flags. Same date sanitization applies to each piece's `expectedDeliveryAt`.
 - `GET /admin/production/job-cards/:gatiPieceCode` — single line item detail + StageMovement timeline (called when a user clicks into a specific piece from the per-order view).
 - `GET /admin/production/job-cards?...` — flat JobCard search (advanced filter, e.g. "show all pieces stuck at SETTING across all orders").
 
@@ -377,12 +378,26 @@ Response: `[{ diamondCode, gSize, sieve, mm, onHand, allocated, available, requi
 ### 6.1 Material-Loss Accounting
 
 **Data sources:**
-- `StageMovement.weightInGrams`, `weightOutGrams` — gold loss per movement
-- `StageMovement.stonesIn`, `stonesOut` — stone loss per movement
-- `MetalLedger` — issued vs returned per JobCard
-- `DiamondAllocation` — allocated vs consumed per JobCard
+- `StageMovement.weightInGrams`, `weightOutGrams` — gold loss per movement (floor weighing, stage-level)
+- `StageMovement.stonesIn`, `stonesOut` — stone loss per movement (floor count, stage-level)
+- `MetalLedger` — issued vs returned per JobCard (vault-level gold fallback)
+- `DiamondAllocation` — allocated vs consumed per JobCard (vault-level stone fallback)
 
-**Per-JobCard loss:** `goldLoss = totalIssued - totalReturned - finalPieceWeight`. Negative finals (where outWeight < inWeight) flagged.
+**Two-tier tracking strategy (Vault Level vs Stage Level):**
+
+*Gold — stage primary, MetalLedger fallback:*
+- If `StageMovement.weightInGrams > 0`: `goldLoss = sum(weightInGrams) − sum(weightOutGrams)` — most accurate; shows which stage bled metal.
+- Fallback (stage weights absent): `goldLoss = MetalLedger.issued − MetalLedger.returned − finalPieceWeight`.
+
+*Stones — stage primary, DiamondAllocation fallback:*
+- Vault level (admin action): Admin clicks **Allocate Stones** on the JobCard. This creates a `DiamondAllocation` record (`quantityAllocated = N, quantityConsumed = 0`) **and** a negative `DiamondInventoryLedger` entry so those stones are immediately removed from available vault stock.
+- Stage level (WIP upload): When the GatiSOFT WIP file includes stone-count columns per stage, the import adapter writes `stonesIn` / `stonesOut` on each `StageMovement` as pieces move between departments.
+- If `StageMovement.stonesIn > 0`: `stoneLoss = sum(stonesIn) − sum(stonesOut)` — pinpoints which stage (and cell) lost the stone.
+- Fallback (stage counts absent): `stoneLoss = DiamondAllocation.quantityAllocated − DiamondAllocation.quantityConsumed` — vault-level total; flags that stones are missing even when floor data is unavailable.
+- When an allocation is **consumed** (stones physically set into jewelry), `quantityConsumed` is incremented and a `consumption` audit entry (quantity = 0, no double-count) is added to `DiamondInventoryLedger`.
+- When an allocation is **released** (job cancelled / stones returned), a positive `return` ledger entry restores the stones to available stock.
+
+**Per-JobCard gold loss:** `goldLoss = totalIssued − totalReturned − finalPieceWeight`. Negative finals (where outWeight < inWeight) flagged.
 
 **Reports:**
 - Per-JobCard loss summary
@@ -393,8 +408,9 @@ Response: `[{ diamondCode, gSize, sieve, mm, onHand, allocated, available, requi
 
 **Endpoints:**
 - `GET /admin/production/material-loss/summary?from=&to=`
-- `GET /admin/production/material-loss/by-stage`
-- `GET /admin/production/material-loss/by-cell`
+- `GET /admin/production/material-loss/by-stage` — shows all stages with movement data; loss is 0g when weights not recorded
+- `GET /admin/production/material-loss/by-cell` — same approach as by-stage
+- `GET /admin/production/material-loss/by-job-card` — bulk list for all JobCards (sorted by gold loss descending)
 - `GET /admin/production/material-loss/by-job-card/:id`
 
 ### 6.2 Auto-PO Drafting
@@ -534,6 +550,7 @@ All persisted in `Alert` collection with ack/resolve workflow.
 - `GET /admin/production/material-loss/summary?from=&to=`
 - `GET /admin/production/material-loss/by-stage`
 - `GET /admin/production/material-loss/by-cell`
+- `GET /admin/production/material-loss/by-job-card` — bulk list for all JobCards
 - `GET /admin/production/material-loss/by-job-card/:id`
 
 ### Purchase Orders (auto-PO)
@@ -931,7 +948,7 @@ Reads from Buffer (works for both `.xlsx` and CSV input — `xlsx` autodetects).
 ```ts
 classifyRow(rawAliasName: string, aliases: GatiAliasMap): "diamond" | "metal" | "finding" | "unknown"
 mapOrderRow(raw: Record<string,unknown>, mapping: GatiOrderColumnEntry[]): Record<string, unknown>
-parseGatiDate(s: string): Date | null   // MM/DD/YYYY
+parseGatiDate(s: unknown): Date | null   // MM/DD/YYYY string or Excel serial number
 toNumber(v: unknown): number | null
 ```
 
@@ -1174,7 +1191,8 @@ This is the only existing-file edit Phase 1 needs.
 - **APIs**:
   - `GET /admin/production/job-cards/:id` (or `.../by-code?code=`)
   - `GET /admin/production/job-cards/:id/movements`
-  - `GET /admin/production/material-loss/by-job-card/:id`
+- `GET /admin/production/material-loss/by-job-card` — bulk list for all JobCards (sorted by gold loss descending)
+- `GET /admin/production/material-loss/by-job-card/:id`
   - `GET /admin/production/inventory/allocations/by-job-card/:id`
   - `GET /admin/production/inventory/metal-ledger/by-job-card/:id`
   - `PUT /admin/production/job-cards/:id/findings`
@@ -1260,7 +1278,7 @@ This is the only existing-file edit Phase 1 needs.
   - **By Stage** — horizontal bar chart of gold-loss % per stage, drill table
   - **By Cell** — same shape, useful for "is Filing C1 worse than C2?"
   - **By JobCard** — table of the top lossiest (call by-job-card per row), click → JobCard Detail
-- **APIs**: `GET /admin/production/material-loss/summary?from=&to=`, `/by-stage`, `/by-cell`, `/by-job-card/:id`
+- **APIs**: `GET /admin/production/material-loss/summary?from=&to=`, `/by-stage`, `/by-cell`, `/by-job-card` (bulk), `/by-job-card/:id`
 
 ---
 
