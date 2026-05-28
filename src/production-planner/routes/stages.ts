@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import { StageDefinition } from "../models/stageDefinition";
+import { GatiColumnMap } from "../models/gatiColumnMap";
 import { UNIT_OF_WORK, type UnitOfWork } from "../types";
 
 const router = Router();
@@ -75,6 +76,98 @@ router.post("/stages", requireAuth, requireRole("admin"), async (req, res) => {
     return res.status(201).json({ stage });
   } catch {
     return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * Infer a base stage code from a raw WIP column name.
+ * Strips trailing `-N` suffix (e.g. `FIL-2` → `FIL`) and trailing digits
+ * (e.g. `FPL2` → `FPL`). Falls back to the raw column uppercased.
+ */
+function inferStageCode(raw: string): string {
+  let base = raw.trim().toUpperCase();
+  base = base.replace(/-\d+$/, "");   // e.g. FIL-2 → FIL
+  base = base.replace(/\d+$/, "");    // e.g. FPL2 → FPL
+  return base || raw.trim().toUpperCase();
+}
+
+/** Derive a human-readable display name from a stage code. */
+function codeToName(code: string): string {
+  return code
+    .replace(/_/g, " ")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * POST /stages/seed-from-movements
+ *
+ * Auto-detect stage codes from the raw column names stored in the WIP column
+ * map, then create StageDefinition records for any that don't exist yet.
+ *
+ * Response shape expected by the frontend:
+ *   { created: number; skipped: number; newCodes: string[] }
+ */
+router.post("/stages/seed-from-movements", requireAuth, requireRole("admin"), async (_req, res) => {
+  try {
+    const map = await GatiColumnMap.findOne({ fileType: "wip", active: true });
+    if (!map || !map.wipColumns || map.wipColumns.length === 0) {
+      return res.status(200).json({ created: 0, skipped: 0, newCodes: [] });
+    }
+
+    const rawColumns: string[] = (map.wipColumns as Array<{ rawColumn: string }>)
+      .map((c) => c.rawColumn)
+      .filter(Boolean);
+
+    if (rawColumns.length === 0) {
+      return res.status(200).json({ created: 0, skipped: 0, newCodes: [] });
+    }
+
+    // Infer unique candidate stage codes
+    const candidateCodes = [...new Set(rawColumns.map(inferStageCode))];
+
+    const existing = await StageDefinition.find({ code: { $in: candidateCodes } }).lean();
+    const existingSet = new Set(existing.map((s) => s.code));
+
+    const newCodes: string[] = [];
+    for (const code of candidateCodes) {
+      if (!existingSet.has(code)) {
+        newCodes.push(code);
+      }
+    }
+
+    if (newCodes.length === 0) {
+      return res.status(200).json({ created: 0, skipped: candidateCodes.length, newCodes: [] });
+    }
+
+    const now = new Date();
+    const docs = newCodes.map((code) => ({
+      code,
+      name: codeToName(code),
+      expectedDurationHours: 24,
+      dependencies: [],
+      unitOfWork: "piece" as const,
+      isOptional: false,
+      isTerminal: false,
+      displayOrder: 0,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    await StageDefinition.insertMany(docs);
+
+    return res.status(200).json({
+      created: newCodes.length,
+      skipped: candidateCodes.length - newCodes.length,
+      newCodes,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Server error";
+    return res.status(500).json({ error: message });
   }
 });
 
