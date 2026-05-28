@@ -3,6 +3,10 @@ import type { Types } from "mongoose";
 import { GatiColumnMap, type GatiColumnMapDocument } from "../../models/gatiColumnMap";
 import { GatiImportRun, type GatiImportRunDocument } from "../../models/gatiImportRun";
 import type { DiamondSpec, FindingEntry, ImportRowError } from "../../types";
+import {
+  DEFAULT_ALIASES,
+  DEFAULT_ORDER_COLUMNS,
+} from "../bootstrap/columnMapDefaults";
 import { findOrCreateDiamond } from "../inventory/diamondSeedService";
 import {
   upsertFromOrderImport,
@@ -53,9 +57,18 @@ export async function ingestOrdersFile(
 
   try {
     // Load the active column map (or create a fresh default if none).
+    // NOTE: always include aliases so a DB-wipe-without-restart doesn't
+    // produce a blank map and fail every row with "Unknown RawAliasName".
     let columnMap = await GatiColumnMap.findOne({ fileType: "orders", active: true });
     if (!columnMap) {
-      columnMap = await GatiColumnMap.create({ fileType: "orders" });
+      columnMap = await GatiColumnMap.create({
+        fileType: "orders",
+        version: 1,
+        aliases: DEFAULT_ALIASES,
+        orderColumns: DEFAULT_ORDER_COLUMNS.map((c) => ({ ...c })),
+        wipColumns: [],
+        active: true,
+      });
     }
 
     // Parse workbook — combine ALL sheets so GatiSOFT files that spread orders

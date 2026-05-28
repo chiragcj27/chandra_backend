@@ -51,4 +51,16 @@ router.get("/imports/runs/:id", requireAuth, requireRole("admin"), async (req, r
   }
 });
 
+router.delete("/imports/runs/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  const id = String(req.params.id);
+  if (!Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid run id" });
+  try {
+    const run = await GatiImportRun.findByIdAndDelete(id);
+    if (!run) return res.status(404).json({ error: "Not found" });
+    return res.status(200).json({ deleted: true, id });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 export default router;

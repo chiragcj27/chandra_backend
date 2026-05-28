@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import { StageDefinition } from "../models/stageDefinition";
+import { GatiColumnMap } from "../models/gatiColumnMap";
 import { UNIT_OF_WORK, type UnitOfWork } from "../types";
 
 const router = Router();
@@ -75,6 +76,116 @@ router.post("/stages", requireAuth, requireRole("admin"), async (req, res) => {
     return res.status(201).json({ stage });
   } catch {
     return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * Infer a base stage code from a raw WIP column name.
+ *
+ * Priority: use the stageCode already stored in the wipColumns entry (set by the
+ * admin or by the default seed). Fall back to deriving from the rawColumn only
+ * when stageCode is blank (pending/unmapped entry).
+ *
+ * Derivation strips trailing `-N` suffix (e.g. `FIL-2` → `FIL`), trailing
+ * digits WITHOUT a preceding space (e.g. `FPL2` → `FPL`), and any remaining
+ * whitespace — so `"FG 2"` → `"FG"` (not `"FG "`).
+ */
+function inferStageCode(raw: string): string {
+  let base = raw.trim().toUpperCase();
+  base = base.replace(/-\d+$/, "");      // FIL-2  → FIL
+  base = base.replace(/\s+\d+$/, "");   // FG 2   → FG  (space + digits at end)
+  base = base.replace(/\d+$/, "");      // FPL2   → FPL (bare trailing digits)
+  base = base.trim();                    // remove any leftover spaces
+  return base || raw.trim().toUpperCase();
+}
+
+/** Derive a human-readable display name from a stage code. */
+function codeToName(code: string): string {
+  return code
+    .replace(/_/g, " ")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * POST /stages/seed-from-movements
+ *
+ * Auto-detect stage codes from the raw column names stored in the WIP column
+ * map, then create StageDefinition records for any that don't exist yet.
+ *
+ * Response shape expected by the frontend:
+ *   { created: number; skipped: number; newCodes: string[] }
+ */
+router.post("/stages/seed-from-movements", requireAuth, requireRole("admin"), async (_req, res) => {
+  try {
+    const map = await GatiColumnMap.findOne({ fileType: "wip", active: true });
+    if (!map || !map.wipColumns || map.wipColumns.length === 0) {
+      return res.status(200).json({ created: 0, skipped: 0, newCodes: [] });
+    }
+
+    // Derive candidate stage codes:
+    // 1. If a wipColumn already has a stageCode (set by seed or admin) → use it directly.
+    // 2. If stageCode is blank (pending/newly-discovered column) → infer from rawColumn.
+    // This ensures seeded mappings like FIL→FILING create "FILING", not "FIL".
+    const candidateCodes = [
+      ...new Set(
+        (map.wipColumns as Array<{ rawColumn: string; stageCode: string }>)
+          .map((c) => c.stageCode ? c.stageCode.trim().toUpperCase() : inferStageCode(c.rawColumn))
+          .filter(Boolean)
+      ),
+    ];
+
+    // Use bulkWrite with upsert so this endpoint is fully idempotent —
+    // tapping "Detect stages" multiple times never causes duplicate-key errors.
+    const bulkOps = candidateCodes.map((code) => ({
+      updateOne: {
+        filter: { code },
+        update: {
+          $setOnInsert: {
+            code,
+            name: codeToName(code),
+            expectedDurationHours: 24,
+            dependencies: [],
+            unitOfWork: "piece" as const,
+            isOptional: false,
+            isTerminal: false,
+            displayOrder: 0,
+            active: true,
+          },
+        },
+        upsert: true,
+      },
+    }));
+
+    const result = await StageDefinition.bulkWrite(bulkOps, { ordered: false });
+    const created = result.upsertedCount ?? 0;
+    const skipped = candidateCodes.length - created;
+    const newCodes = Object.values(result.upsertedIds ?? {}).map(
+      (_, i) => candidateCodes[i]
+    );
+
+    // Back-fill stageCode + default cellCode "C1" for any pending wipColumn entries
+    // so the Column Maps screen shows everything filled in without manual work.
+    let mapChanged = false;
+    for (const entry of map.wipColumns as Array<{ rawColumn: string; stageCode: string; cellCode: string }>) {
+      if (!entry.stageCode) {
+        entry.stageCode = inferStageCode(entry.rawColumn);
+        entry.cellCode = entry.cellCode || "C1";
+        mapChanged = true;
+      } else if (!entry.cellCode) {
+        entry.cellCode = "C1";
+        mapChanged = true;
+      }
+    }
+    if (mapChanged) await map.save();
+
+    return res.status(200).json({ created, skipped, newCodes });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Server error";
+    return res.status(500).json({ error: message });
   }
 });
 
