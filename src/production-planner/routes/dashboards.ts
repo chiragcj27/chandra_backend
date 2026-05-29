@@ -2,10 +2,154 @@ import { Router } from "express";
 
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import { Alert } from "../models/alert";
+import { CapacityBaseline } from "../models/capacityBaseline";
+import { GatiColumnMap } from "../models/gatiColumnMap";
 import { JobCard, type JobCardDocument } from "../models/jobCard";
+import { ProductionCalendar } from "../models/productionCalendar";
 import { StageDefinition } from "../models/stageDefinition";
 import { getAnalyticsSnapshot } from "../services/production/analyticsService";
 import type { StageDistributionEntry } from "../types";
+
+const DEFAULT_DAILY_HOURS = 9;
+const BOTTLENECK_QUEUE_DAYS = 3;
+
+/** Working days left this month (Sun = non-working). */
+function workingDaysLeft(): number {
+  const now = new Date();
+  const year = now.getUTCFullYear(), month = now.getUTCMonth();
+  const end = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  let count = 0;
+  for (let d = now.getUTCDate(); d <= end; d++) {
+    if (new Date(Date.UTC(year, month, d)).getUTCDay() !== 0) count++;
+  }
+  return Math.max(count, 1);
+}
+
+// ── Capacity caching ──────────────────────────────────────────────────────────
+interface ConfigCache {
+  baselines: { stageCode: string; unitsPerDay: number; sampleSize: number }[];
+  stages: { code: string; expectedDurationHours: number }[];
+  /** stageCode → number of distinct cell codes */
+  stageCells: Map<string, number>;
+  dailyHours: number;
+}
+
+interface CapacityPayload {
+  monthLoadPct: number;
+  totalQueueUnits: number;
+  monthCapacityUnits: number;
+  bottlenecks: { stageCode: string; queueUnits: number; capacityPerDay: number; queueDays: number }[];
+}
+
+/**
+ * Static config (baselines, stage defs, WIP cell counts, calendar hours).
+ * Fetched once per process lifetime — these records change only through
+ * deliberate settings updates, not during normal usage.
+ */
+let _configCache: ConfigCache | null = null;
+
+/**
+ * Computed capacity result — valid for CAPACITY_TTL_MS.
+ * Call invalidateCapacityCache() after a WIP upload to force a refresh.
+ */
+let _capacityCache: { result: CapacityPayload; expiresAt: number } | null = null;
+const CAPACITY_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Force-refresh capacity on next request (e.g. after WIP import). */
+export function invalidateCapacityCache(): void {
+  _capacityCache = null;
+}
+
+async function loadConfig(): Promise<ConfigCache> {
+  if (_configCache) return _configCache;
+
+  const [baselines, stages, wipMap, calendar] = await Promise.all([
+    CapacityBaseline.find({ windowDays: 30 })
+      .select({ stageCode: 1, unitsPerDay: 1, sampleSize: 1 })
+      .lean(),
+    StageDefinition.find({ active: true })
+      .select({ code: 1, expectedDurationHours: 1 })
+      .lean(),
+    GatiColumnMap.findOne({ fileType: "wip", active: true })
+      .select({ wipColumns: 1 })
+      .lean(),
+    ProductionCalendar.findOne({ key: "default" })
+      .select({ defaultDailyHours: 1 })
+      .lean(),
+  ]);
+
+  // Build distinct-cell-count per stage from the WIP column map
+  const cellSets = new Map<string, Set<string>>();
+  for (const col of (wipMap as { wipColumns?: { stageCode: string; cellCode: string }[] } | null)
+    ?.wipColumns ?? []) {
+    const s = cellSets.get(col.stageCode) ?? new Set<string>();
+    s.add(col.cellCode);
+    cellSets.set(col.stageCode, s);
+  }
+  const stageCells = new Map<string, number>();
+  for (const [code, s] of cellSets) stageCells.set(code, s.size);
+
+  _configCache = {
+    baselines: baselines as { stageCode: string; unitsPerDay: number; sampleSize: number }[],
+    stages: stages as { code: string; expectedDurationHours: number }[],
+    stageCells,
+    dailyHours:
+      (calendar as { defaultDailyHours?: number } | null)?.defaultDailyHours ??
+      DEFAULT_DAILY_HOURS,
+  };
+  return _configCache;
+}
+
+function computeCapacity(cfg: ConfigCache, queueByStage: Map<string, number>): CapacityPayload {
+  const baselineMap = new Map(cfg.baselines.map((b) => [b.stageCode, b]));
+  const bottlenecks: CapacityPayload["bottlenecks"] = [];
+  let tightestQueueDays = 0;
+  let tightestQueueUnits = 0;
+  let tightestCapacityPerDay = 0;
+
+  for (const stage of cfg.stages) {
+    const bl = baselineMap.get(stage.code);
+    const unitsPerDay =
+      bl && bl.sampleSize > 0
+        ? bl.unitsPerDay
+        : stage.expectedDurationHours > 0
+        ? cfg.dailyHours / stage.expectedDurationHours
+        : 0;
+
+    const cells = Math.max(cfg.stageCells.get(stage.code) ?? 0, 1);
+    const capacityPerDay = unitsPerDay * cells;
+    const queueUnits = queueByStage.get(stage.code) ?? 0;
+    const queueDays = capacityPerDay > 0 ? queueUnits / capacityPerDay : 0;
+
+    if (queueDays >= BOTTLENECK_QUEUE_DAYS) {
+      bottlenecks.push({
+        stageCode: stage.code,
+        queueUnits,
+        capacityPerDay,
+        queueDays: Math.round(queueDays * 10) / 10,
+      });
+    }
+    if (queueDays > tightestQueueDays) {
+      tightestQueueDays = queueDays;
+      tightestQueueUnits = queueUnits;
+      tightestCapacityPerDay = capacityPerDay;
+    }
+  }
+
+  bottlenecks.sort((a, b) => b.queueDays - a.queueDays);
+  const daysLeft = workingDaysLeft();
+  const monthCapacityUnits = tightestCapacityPerDay * daysLeft;
+
+  return {
+    monthLoadPct:
+      monthCapacityUnits > 0
+        ? Math.round((tightestQueueUnits / monthCapacityUnits) * 100)
+        : 0,
+    totalQueueUnits: tightestQueueUnits,
+    monthCapacityUnits: Math.round(monthCapacityUnits * 10) / 10,
+    bottlenecks: bottlenecks.slice(0, 3),
+  };
+}
 
 const router = Router();
 
@@ -246,102 +390,99 @@ router.get(
 /**
  * GET /dashboards/summary — lightweight dashboard summary.
  *
- * Returns order counts by status, late-order count, per-stage piece load,
- * total open-alert count, and the 10 most-recent open alerts.
- * Everything computed via 4 parallel MongoDB aggregations — no in-memory rollup.
+ * Returns order counts, late-order count, open-alert count + 10 items,
+ * and capacity numbers (month-load %, top-3 bottlenecks).
+ *
+ * Optimizations vs. the naive 8-query approach:
+ *  - Static config (baselines / stages / cells / calendar) is cached for the
+ *    process lifetime — fetched exactly once after server start.
+ *  - The computed capacity result is cached for CAPACITY_TTL_MS (5 min).
+ *    On a cache hit only 3 queries run (orders agg + 2 alert queries).
+ *  - The order aggregation only scans non-completed/non-cancelled job cards,
+ *    skipping potentially thousands of historical documents.
  */
 router.get("/dashboards/summary", requireAuth, requireRole("admin"), async (_req, res) => {
   try {
     const now = new Date();
     const badDateFloor = new Date("2000-01-01");
 
-    const [orderAgg, stageLoadAgg, alertsCount, recentAlerts] = await Promise.all([
-      // ── 1. Order counts by aggregate status + late count ──────────────────
-      // Group job cards → derive each order's status → $facet into buckets.
-      JobCard.aggregate<{
-        byStatus: { _id: string; count: number }[];
-        lateOrders: { n: number }[];
-        total: { n: number }[];
-      }>([
-        {
-          $group: {
-            _id: "$orderNumber",
-            allCompleted: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
-            anyOnHold:   { $sum: { $cond: [{ $eq: ["$status", "on_hold"]   }, 1, 0] } },
-            anyInProgress: { $sum: { $cond: [{ $eq: ["$status", "in_progress"] }, 1, 0] } },
-            total:       { $sum: 1 },
-            minDelivery: { $min: "$expectedDeliveryAt" },
+    // ── Order agg (only open job cards — skips all historical completed docs) ─
+    const orderAggP = JobCard.aggregate<{
+      open: { n: number }[];
+      late: { n: number }[];
+    }>([
+      { $match: { status: { $nin: ["completed", "cancelled"] } } },
+      { $group: { _id: "$orderNumber", minDelivery: { $min: "$expectedDeliveryAt" } } },
+      {
+        $project: {
+          isLate: {
+            $and: [
+              { $ne:  ["$minDelivery", null]        },
+              { $gte: ["$minDelivery", badDateFloor] },
+              { $lt:  ["$minDelivery", now]          },
+            ],
           },
         },
-        {
-          $project: {
-            orderStatus: {
-              $switch: {
-                branches: [
-                  { case: { $eq: ["$allCompleted", "$total"] }, then: "completed" },
-                  { case: { $gt: ["$anyOnHold",    0]        }, then: "on_hold"   },
-                  { case: { $gt: ["$anyInProgress", 0]       }, then: "in_progress" },
-                ],
-                default: "pending",
-              },
-            },
-            isLate: {
-              $and: [
-                { $ne:  ["$minDelivery", null] },
-                { $gte: ["$minDelivery", badDateFloor] },
-                { $lt:  ["$minDelivery", now]  },
-                { $lt:  ["$allCompleted", "$total"] },
-              ],
-            },
-          },
+      },
+      {
+        $facet: {
+          open: [{ $count: "n" }],
+          late: [{ $match: { isLate: true } }, { $count: "n" }],
         },
-        {
-          $facet: {
-            byStatus:   [{ $group: { _id: "$orderStatus", count: { $sum: 1 } } }],
-            lateOrders: [{ $match: { isLate: true } }, { $count: "n" }],
-            total:      [{ $count: "n" }],
-          },
-        },
-      ]),
+      },
+    ]);
 
-      // ── 2. Stage load: pieces + qty per stage across open job cards ───────
-      JobCard.aggregate<{ _id: string; qty: number; pieces: number }>([
+    const alertCountP  = Alert.countDocuments({ resolvedAt: { $exists: false } });
+    const alertItemsP  = Alert.find({ resolvedAt: { $exists: false } })
+      .sort({ severity: 1, raisedAt: -1 })
+      .limit(10)
+      .lean();
+
+    const useCache = _capacityCache !== null && _capacityCache.expiresAt > Date.now();
+
+    let capacity: CapacityPayload;
+    let orderFacet: { open: { n: number }[]; late: { n: number }[] };
+    let alertsCount: number;
+    let recentAlerts: unknown[];
+
+    if (useCache) {
+      // ── Cache hit: only 3 queries ──────────────────────────────────────────
+      const [oa, ac, ra] = await Promise.all([orderAggP, alertCountP, alertItemsP]);
+      orderFacet  = oa[0] ?? { open: [], late: [] };
+      alertsCount = ac;
+      recentAlerts = ra;
+      capacity    = _capacityCache!.result;
+    } else {
+      // ── Cache miss: also fetch queue data + static config ─────────────────
+      const stageLoadP = JobCard.aggregate<{ _id: string; qty: number }>([
         { $match: { status: { $in: ["pending", "planned", "in_progress", "on_hold"] } } },
         { $unwind: "$currentStageDistribution" },
         {
           $group: {
-            _id:    "$currentStageDistribution.stageCode",
-            qty:    { $sum: "$currentStageDistribution.qty" },
-            pieces: { $sum: 1 },
+            _id:  "$currentStageDistribution.stageCode",
+            qty:  { $sum: "$currentStageDistribution.qty" },
           },
         },
-        { $sort: { qty: -1 } },
-      ]),
+      ]);
 
-      // ── 3. Open alert count ───────────────────────────────────────────────
-      Alert.countDocuments({ resolvedAt: { $exists: false } }),
+      const [oa, ac, ra, stageLoad, cfg] = await Promise.all([
+        orderAggP, alertCountP, alertItemsP, stageLoadP, loadConfig(),
+      ]);
+      orderFacet  = oa[0] ?? { open: [], late: [] };
+      alertsCount = ac;
+      recentAlerts = ra;
 
-      // ── 4. First 10 open alerts (critical first, then by recency) ─────────
-      Alert.find({ resolvedAt: { $exists: false } })
-        .sort({ severity: 1, raisedAt: -1 })
-        .limit(10)
-        .lean(),
-    ]);
-
-    const facet = orderAgg[0] ?? { byStatus: [], lateOrders: [], total: [] };
-    const statusMap: Record<string, number> = {};
-    for (const b of facet.byStatus) statusMap[b._id] = b.count;
-    const open =
-      (statusMap["pending"] ?? 0) +
-      (statusMap["in_progress"] ?? 0) +
-      (statusMap["on_hold"] ?? 0);
+      const queueByStage = new Map<string, number>(stageLoad.map((r) => [r._id, r.qty]));
+      capacity = computeCapacity(cfg, queueByStage);
+      _capacityCache = { result: capacity, expiresAt: Date.now() + CAPACITY_TTL_MS };
+    }
 
     return res.status(200).json({
       orders: {
-        open,
-        late: facet.lateOrders[0]?.n ?? 0,
+        open: orderFacet.open[0]?.n ?? 0,
+        late: orderFacet.late[0]?.n ?? 0,
       },
-      stageLoad: stageLoadAgg,   // [{ _id: "WAX", qty: 120, pieces: 45 }, ...]
+      capacity,
       alerts: {
         total: alertsCount,
         items: recentAlerts,
