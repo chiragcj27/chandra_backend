@@ -8,6 +8,9 @@ import {
   recomputeBaselines,
 } from "../services/production/capacityService";
 import { planNewOrder, type OrderSpec } from "../services/production/planningService";
+import { runAlertRulesAsync } from "../services/production/alertEngine";
+import { refreshAllETAs } from "../services/production/etaService";
+import { invalidateAllCaches } from "./dashboards";
 import { PRIORITY_LEVELS, type PriorityLevel } from "../types";
 
 const router = Router();
@@ -70,6 +73,11 @@ router.post(
   async (_req, res) => {
     try {
       const baselines = await recomputeBaselines();
+      // Immediately refresh ETAs so plannedCompletionAt is up-to-date.
+      // Also clear caches and run full alert pass in the background.
+      await refreshAllETAs();
+      invalidateAllCaches();
+      void runAlertRulesAsync();
       return res.status(200).json({ baselines });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Server error";

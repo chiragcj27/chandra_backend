@@ -87,13 +87,20 @@ export async function computeStageVelocityMap(
 export async function refreshAllETAs(): Promise<{ updated: number }> {
   const now = new Date();
 
-  // ── 1. Main flow stages only (displayOrder 1–89, sorted) ──────────────────
+  // ── 1. Load stages — prefer main flow (displayOrder 1–89), but keep ALL
+  //    active stages as a fallback so job cards whose currentStageDistribution
+  //    still has old/renamed codes (e.g. PRE_POLISH → POL) still get an ETA.
   const allStages = await StageDefinition.find({ active: true }).sort({
     displayOrder: 1,
   });
   const flowStages = allStages.filter(
     (s) => s.displayOrder >= 1 && s.displayOrder < 90
   );
+  // Also include inactive stages in the lookup so transitional pieces
+  // (still at a renamed stage) don't get silently skipped.
+  const allStagesIncInactive = await StageDefinition.find({}).sort({ displayOrder: 1 });
+  const stageByCode = new Map(allStagesIncInactive.map((s) => [s.code, s]));
+
   if (flowStages.length === 0) return { updated: 0 };
 
   // ── 2. Velocity factors ───────────────────────────────────────────────────
@@ -124,9 +131,29 @@ export async function refreshAllETAs(): Promise<{ updated: number }> {
     );
     if (currentCodes.size === 0) continue;
 
-    // Earliest stage in the flow that this piece is currently at
-    const startIdx = flowStages.findIndex((s) => currentCodes.has(s.code));
-    if (startIdx === -1) continue;
+    // Find where the piece is in the main flow.
+    // If the piece is at an old/renamed stage (e.g. PRE_POLISH → POL),
+    // use that stage's displayOrder to splice into the flow at the right position.
+    let startIdx = flowStages.findIndex((s) => currentCodes.has(s.code));
+
+    if (startIdx === -1) {
+      // Fallback: find the first current stage code (even if inactive/renamed),
+      // get its displayOrder, and splice in at the nearest flow position.
+      for (const code of currentCodes) {
+        const fallback = stageByCode.get(code);
+        if (!fallback) continue;
+        // Find the first flow stage at or after this displayOrder
+        const spliceIdx = flowStages.findIndex(
+          (s) => s.displayOrder >= fallback.displayOrder
+        );
+        if (spliceIdx !== -1) {
+          startIdx = spliceIdx;
+          break;
+        }
+      }
+      // If still not found, start from the last flow stage (almost done)
+      if (startIdx === -1) startIdx = Math.max(0, flowStages.length - 1);
+    }
 
     let totalHours = 0;
     const jcId = jc._id.toString();
