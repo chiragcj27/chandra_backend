@@ -1,36 +1,53 @@
 /**
  * Idempotent seed helpers — safe to call on every server start.
- * Uses bulkWrite + $setOnInsert so existing records are never overwritten.
+ *
+ * Strategy:
+ *  - displayOrder, name, isOptional, isTerminal → always refreshed via $set
+ *    (so reordering stages in columnMapDefaults takes effect on next boot).
+ *  - expectedDurationHours → always refreshed via $set (canonical hours from columnMapDefaults).
+ *  - dependencies, unitOfWork → $setOnInsert only (admin edits preserved across restarts).
+ *  - Obsolete stages (merged into other stage's cells) → deactivated.
  */
 
 import { StageDefinition } from "../../models/stageDefinition";
-import { DEFAULT_STAGE_DEFINITIONS } from "./columnMapDefaults";
+import { DEFAULT_STAGE_DEFINITIONS, OBSOLETE_STAGE_CODES } from "./columnMapDefaults";
 
-/**
- * Ensure every predefined stage exists in StageDefinition.
- * Uses upsert ($setOnInsert) so admin edits (name, duration, etc.) are preserved.
- */
 export async function seedDefaultStages(): Promise<void> {
   const ops = DEFAULT_STAGE_DEFINITIONS.map((s, i) => ({
     updateOne: {
       filter: { code: s.code },
       update: {
+        // Always refresh visual/flow metadata + canonical expected hours
+        $set: {
+          displayOrder:          s.displayOrder ?? i,
+          name:                  s.name,
+          isOptional:            s.isOptional  ?? false,
+          isTerminal:            s.isTerminal  ?? false,
+          active:                true,
+          expectedDurationHours: s.expectedDurationHours ?? 24,
+          ...(s.parallelGroup != null ? { parallelGroup: s.parallelGroup } : {}),
+        },
+        // Only set structural fields on first insert
         $setOnInsert: {
-          code: s.code,
-          name: s.name,
-          expectedDurationHours: 24,
+          code:        s.code,
           dependencies: [] as string[],
-          unitOfWork: "piece" as const,
-          isOptional: false,
-          isTerminal: (s as { isTerminal?: boolean }).isTerminal ?? false,
-          displayOrder: (s as { displayOrder?: number }).displayOrder ?? i,
-          active: true,
+          unitOfWork:   "piece" as const,
         },
       },
       upsert: true,
     },
   }));
+
   await StageDefinition.bulkWrite(ops, { ordered: false });
+
+  // Deactivate stages that have been merged into other stages as cells
+  if (OBSOLETE_STAGE_CODES.length > 0) {
+    await StageDefinition.updateMany(
+      { code: { $in: [...OBSOLETE_STAGE_CODES] } },
+      { $set: { active: false, displayOrder: 100 } }
+    );
+  }
+
   if (process.env.NODE_ENV !== "test") {
     console.log(`[ProductionPlanner] Stage seed: ${ops.length} predefined stages ensured.`);
   }

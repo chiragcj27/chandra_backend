@@ -4,6 +4,7 @@ import { GatiColumnMap } from "../models/gatiColumnMap";
 import { GatiImportRun } from "../models/gatiImportRun";
 import { JobCard } from "../models/jobCard";
 import { StageMovement } from "../models/stageMovement";
+import { invalidateAllCaches } from "./dashboards";
 
 const router = Router();
 
@@ -29,6 +30,11 @@ router.post(
         GatiImportRun.deleteMany({}),
         GatiColumnMap.deleteMany({}),
       ]);
+
+      // Clear in-memory caches so the dashboard reflects the fresh state
+      // immediately on next request rather than serving stale data.
+      invalidateAllCaches();
+
       res.json({
         ok: true,
         deleted: {

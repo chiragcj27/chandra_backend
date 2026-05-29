@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import { ingestWipFile } from "../services/integrations/gatiWipAdapter";
 import { runAlertRulesAsync } from "../services/production/alertEngine";
 import { recomputeBaselines } from "../services/production/capacityService";
+import { invalidateAllCaches } from "./dashboards";
 
 const router = Router();
 
@@ -34,16 +35,29 @@ router.post(
           ? new Types.ObjectId(req.user.id)
           : undefined;
 
+      // DEV-only: ?testDelay=true uses a 2.5× multiplier so each stage's
+      // enteredAt = now − (expectedDurationHours × 2.5), making every stage
+      // appear 1.5× past its own expected time regardless of stage size.
+      const testDelayMultiplier =
+        process.env.NODE_ENV !== "production" && req.query.testDelay === "true"
+          ? 2.5
+          : undefined;
+
       const run = await ingestWipFile({
         buffer: file.buffer,
         fileName: file.originalname ?? "wip.xlsx",
         uploadedBy,
+        testDelayMultiplier,
       });
 
+      // Immediately clear caches so the next dashboard request reflects new data.
+      invalidateAllCaches();
+
       // Background: refresh capacity baselines from the new movement data,
-      // then re-evaluate alerts (which also runs anomaly detection). Both are
-      // best-effort and must not block the import response.
+      // then clear caches again (so baselines are fresh too), then re-evaluate
+      // alerts. All best-effort — must not block the import response.
       void recomputeBaselines()
+        .then(() => invalidateAllCaches())
         .catch((err) => console.error("[importsWip] recomputeBaselines failed:", err))
         .finally(() => runAlertRulesAsync());
 
