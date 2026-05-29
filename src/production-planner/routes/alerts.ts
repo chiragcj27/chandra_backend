@@ -83,6 +83,37 @@ router.post("/alerts/:id/resolve", requireAuth, requireRole("admin"), async (req
   }
 });
 
+router.delete("/alerts/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  const id = String(req.params.id);
+  if (!Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid id" });
+  try {
+    const result = await Alert.deleteOne({ _id: id });
+    if (result.deletedCount === 0) return res.status(404).json({ error: "Alert not found" });
+    return res.status(200).json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+router.delete("/alerts", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const filter: Record<string, unknown> = {};
+    const severity = asEnum(req.query.severity, ALERT_SEVERITIES);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    if (severity) filter.severity = severity;
+    if (status === "open") filter.resolvedAt = { $exists: false };
+    else if (status === "resolved") filter.resolvedAt = { $exists: true };
+    else if (status === "acknowledged") {
+      filter.acknowledgedAt = { $exists: true };
+      filter.resolvedAt = { $exists: false };
+    }
+    const result = await Alert.deleteMany(filter);
+    return res.status(200).json({ ok: true, deleted: result.deletedCount });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
 /**
  * Manually trigger the alert engine. Useful for ops / debugging and as the
  * "Run scan" button on the Alerts page. Returns the scan summary.

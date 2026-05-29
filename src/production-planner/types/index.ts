@@ -8,6 +8,7 @@ export const UNIT_OF_WORK = ["piece", "grams", "stones"] as const;
 export type UnitOfWork = (typeof UNIT_OF_WORK)[number];
 
 export const JOB_CARD_STATUSES = [
+  "pending",
   "planned",
   "in_progress",
   "on_hold",
@@ -74,6 +75,7 @@ export const PO_STATUSES = ["draft", "approved", "sent", "received", "cancelled"
 export type PoStatus = (typeof PO_STATUSES)[number];
 
 export const ORDER_AGGREGATE_STATUSES = [
+  "pending",
   "planned",
   "in_progress",
   "delayed",

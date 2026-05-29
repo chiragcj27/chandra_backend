@@ -55,7 +55,7 @@ export async function buildRequirementsTable(): Promise<RequirementRow[]> {
   const earliestNeededByCode = new Map<string, Date>();
 
   const openJobCards = await JobCard.find({
-    status: { $in: ["planned", "in_progress", "on_hold"] },
+    status: { $in: ["pending", "planned", "in_progress", "on_hold"] },
   }).select({
     diamondSpecs: 1,
     totalQty: 1,

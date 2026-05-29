@@ -52,7 +52,7 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
 
   // Consider all JobCards not yet completed/cancelled.
   const openJobCards = await JobCard.find({
-    status: { $in: ["planned", "in_progress", "on_hold"] },
+    status: { $in: ["pending", "planned", "in_progress", "on_hold"] },
   });
 
   const candidates: AlertCandidate[] = [];

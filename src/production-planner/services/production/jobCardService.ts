@@ -123,7 +123,7 @@ export async function upsertFromOrderImport(
       priority: payload.priority ?? "normal",
       expectedDeliveryAt: payload.expectedDeliveryAt,
       orderedAt: payload.orderedAt,
-      status: "planned" satisfies JobCardStatus,
+      status: "pending" satisfies JobCardStatus,
       currentStageDistribution: [],
       chandraOrderId: parent?._id,
     });

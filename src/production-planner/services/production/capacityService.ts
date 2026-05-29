@@ -180,7 +180,7 @@ export async function buildStageQueues(): Promise<StageQueueInfo[]> {
   // Aggregate qty by stageCode across all open JobCards' currentStageDistribution.
   const queueByStage = new Map<string, number>();
   const queueAgg = await JobCard.aggregate<{ _id: string; total: number }>([
-    { $match: { status: { $in: ["planned", "in_progress", "on_hold"] } } },
+    { $match: { status: { $in: ["pending", "planned", "in_progress", "on_hold"] } } },
     { $unwind: "$currentStageDistribution" },
     {
       $group: {

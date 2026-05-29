@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
+import { Alert } from "../models/alert";
 import { JobCard, type JobCardDocument } from "../models/jobCard";
 import { StageDefinition } from "../models/stageDefinition";
 import { getAnalyticsSnapshot } from "../services/production/analyticsService";
@@ -40,12 +41,12 @@ interface OrderRollup {
   completedCount: number;
   inProgressCount: number;
   onHoldCount: number;
-  plannedCount: number;
+  pendingCount: number;
   delayedCount: number;
   worstLatenessDays: number;
   stageDistribution: { stageCode: string; cellCode: string; qty: number }[];
   priority: "normal" | "urgent" | "critical";
-  status: "planned" | "in_progress" | "on_hold" | "completed";
+  status: "pending" | "in_progress" | "on_hold" | "completed";
 }
 
 function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
@@ -57,7 +58,7 @@ function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
   let completed = 0;
   let inProgress = 0;
   let onHold = 0;
-  let planned = 0;
+  let pending = 0;
   let delayed = 0;
   let worstLatenessDays = 0;
   let earliestDelivery: Date | undefined;
@@ -70,7 +71,7 @@ function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
     if (jc.status === "completed") completed++;
     else if (jc.status === "in_progress") inProgress++;
     else if (jc.status === "on_hold") onHold++;
-    else if (jc.status === "planned") planned++;
+    else if (jc.status === "pending") pending++;
 
     const delDate = sanitizeDate(jc.expectedDeliveryAt);
     if (delDate) {
@@ -101,7 +102,7 @@ function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
   if (jobCards.every((j) => j.status === "completed")) status = "completed";
   else if (jobCards.some((j) => j.status === "on_hold")) status = "on_hold";
   else if (jobCards.some((j) => j.status === "in_progress")) status = "in_progress";
-  else status = "planned";
+  else status = "pending";
 
   return {
     orderNumber,
@@ -112,7 +113,7 @@ function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
     completedCount: completed,
     inProgressCount: inProgress,
     onHoldCount: onHold,
-    plannedCount: planned,
+    pendingCount: pending,
     delayedCount: delayed,
     worstLatenessDays: Math.round(worstLatenessDays * 10) / 10,
     stageDistribution: Array.from(distMap.values()).sort((a, b) =>
@@ -241,6 +242,116 @@ router.get(
     }
   }
 );
+
+/**
+ * GET /dashboards/summary — lightweight dashboard summary.
+ *
+ * Returns order counts by status, late-order count, per-stage piece load,
+ * total open-alert count, and the 10 most-recent open alerts.
+ * Everything computed via 4 parallel MongoDB aggregations — no in-memory rollup.
+ */
+router.get("/dashboards/summary", requireAuth, requireRole("admin"), async (_req, res) => {
+  try {
+    const now = new Date();
+    const badDateFloor = new Date("2000-01-01");
+
+    const [orderAgg, stageLoadAgg, alertsCount, recentAlerts] = await Promise.all([
+      // ── 1. Order counts by aggregate status + late count ──────────────────
+      // Group job cards → derive each order's status → $facet into buckets.
+      JobCard.aggregate<{
+        byStatus: { _id: string; count: number }[];
+        lateOrders: { n: number }[];
+        total: { n: number }[];
+      }>([
+        {
+          $group: {
+            _id: "$orderNumber",
+            allCompleted: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+            anyOnHold:   { $sum: { $cond: [{ $eq: ["$status", "on_hold"]   }, 1, 0] } },
+            anyInProgress: { $sum: { $cond: [{ $eq: ["$status", "in_progress"] }, 1, 0] } },
+            total:       { $sum: 1 },
+            minDelivery: { $min: "$expectedDeliveryAt" },
+          },
+        },
+        {
+          $project: {
+            orderStatus: {
+              $switch: {
+                branches: [
+                  { case: { $eq: ["$allCompleted", "$total"] }, then: "completed" },
+                  { case: { $gt: ["$anyOnHold",    0]        }, then: "on_hold"   },
+                  { case: { $gt: ["$anyInProgress", 0]       }, then: "in_progress" },
+                ],
+                default: "pending",
+              },
+            },
+            isLate: {
+              $and: [
+                { $ne:  ["$minDelivery", null] },
+                { $gte: ["$minDelivery", badDateFloor] },
+                { $lt:  ["$minDelivery", now]  },
+                { $lt:  ["$allCompleted", "$total"] },
+              ],
+            },
+          },
+        },
+        {
+          $facet: {
+            byStatus:   [{ $group: { _id: "$orderStatus", count: { $sum: 1 } } }],
+            lateOrders: [{ $match: { isLate: true } }, { $count: "n" }],
+            total:      [{ $count: "n" }],
+          },
+        },
+      ]),
+
+      // ── 2. Stage load: pieces + qty per stage across open job cards ───────
+      JobCard.aggregate<{ _id: string; qty: number; pieces: number }>([
+        { $match: { status: { $in: ["pending", "planned", "in_progress", "on_hold"] } } },
+        { $unwind: "$currentStageDistribution" },
+        {
+          $group: {
+            _id:    "$currentStageDistribution.stageCode",
+            qty:    { $sum: "$currentStageDistribution.qty" },
+            pieces: { $sum: 1 },
+          },
+        },
+        { $sort: { qty: -1 } },
+      ]),
+
+      // ── 3. Open alert count ───────────────────────────────────────────────
+      Alert.countDocuments({ resolvedAt: { $exists: false } }),
+
+      // ── 4. First 10 open alerts (critical first, then by recency) ─────────
+      Alert.find({ resolvedAt: { $exists: false } })
+        .sort({ severity: 1, raisedAt: -1 })
+        .limit(10)
+        .lean(),
+    ]);
+
+    const facet = orderAgg[0] ?? { byStatus: [], lateOrders: [], total: [] };
+    const statusMap: Record<string, number> = {};
+    for (const b of facet.byStatus) statusMap[b._id] = b.count;
+    const open =
+      (statusMap["pending"] ?? 0) +
+      (statusMap["in_progress"] ?? 0) +
+      (statusMap["on_hold"] ?? 0);
+
+    return res.status(200).json({
+      orders: {
+        open,
+        late: facet.lateOrders[0]?.n ?? 0,
+      },
+      stageLoad: stageLoadAgg,   // [{ _id: "WAX", qty: 120, pieces: 45 }, ...]
+      alerts: {
+        total: alertsCount,
+        items: recentAlerts,
+      },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Server error";
+    return res.status(500).json({ error: message });
+  }
+});
 
 /**
  * GET /dashboards/analytics?from=&to=
