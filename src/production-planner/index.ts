@@ -22,6 +22,7 @@ import requirementsRouter from "./routes/requirements";
 import stagesRouter from "./routes/stages";
 import whatIfRouter from "./routes/whatIf";
 import { seedDefaultStages } from "./services/bootstrap/seedDefaultData";
+import { refreshAllETAs } from "./services/production/etaService";
 
 /**
  * Production Planner module router.
@@ -41,9 +42,17 @@ import { seedDefaultStages } from "./services/bootstrap/seedDefaultData";
 const router = Router();
 
 // Seed predefined stages into DB on startup (idempotent — never overwrites admin edits).
-seedDefaultStages().catch((err) =>
-  console.error("[ProductionPlanner] Stage seed error:", (err as Error).message)
-);
+seedDefaultStages()
+  .then(() =>
+    // Immediately recompute ETAs after seeding so plannedCompletionAt is
+    // populated on first request — even before the 60-second scheduler fires.
+    refreshAllETAs().catch((e) =>
+      console.error("[ProductionPlanner] startup ETA refresh error:", (e as Error).message)
+    )
+  )
+  .catch((err) =>
+    console.error("[ProductionPlanner] Stage seed error:", (err as Error).message)
+  );
 
 // Phase 0
 router.use(stagesRouter);

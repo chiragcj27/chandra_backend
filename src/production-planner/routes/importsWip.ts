@@ -35,13 +35,15 @@ router.post(
           ? new Types.ObjectId(req.user.id)
           : undefined;
 
-      // DEV-only: ?testDelay=true uses a 2.5× multiplier so each stage's
+      // Test delay: ?testDelay=true uses a 2.5× multiplier so each stage's
       // enteredAt = now − (expectedDurationHours × 2.5), making every stage
       // appear 1.5× past its own expected time regardless of stage size.
+      // Enabled when NODE_ENV !== "production" OR ENABLE_WIP_TEST_DELAY=true env is set.
+      const testDelayAllowed =
+        process.env.NODE_ENV !== "production" ||
+        process.env.ENABLE_WIP_TEST_DELAY === "true";
       const testDelayMultiplier =
-        process.env.NODE_ENV !== "production" && req.query.testDelay === "true"
-          ? 2.5
-          : undefined;
+        testDelayAllowed && req.query.testDelay === "true" ? 2.5 : undefined;
 
       const run = await ingestWipFile({
         buffer: file.buffer,
