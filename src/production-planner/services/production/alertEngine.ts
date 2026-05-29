@@ -5,6 +5,7 @@ import { StageMovement } from "../../models/stageMovement";
 import { buildRequirementsTable } from "../inventory/requirementsService";
 import type { AlertSeverity, AlertType } from "../../types";
 import { detectAnomalies } from "./anomalyDetector";
+import { refreshAllETAs } from "./etaService";
 
 /** How much past `expectedDurationHours` is considered "stuck" / "severely stuck". */
 const STUCK_MULTIPLIER = 2.0;
@@ -56,10 +57,12 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
   });
 
   const candidates: AlertCandidate[] = [];
+  // Track stages that have at least one piece overdue (> 1× expected)
+  // Used to emit one STAGE_SLOW alert per stage (not per piece).
+  const slowStages = new Map<string, { worstRatio: number; pieceCount: number }>();
 
   for (const jc of openJobCards) {
-    // ───── PIECE_STUCK / PIECE_SEVERELY_STUCK ─────
-    // For each open StageMovement on this JobCard, check time-in-stage.
+    // ───── PIECE_STUCK / PIECE_SEVERELY_STUCK / STAGE_SLOW ─────
     const openMovs = await StageMovement.find({
       jobCardId: jc._id,
       exitedAt: { $exists: false },
@@ -69,6 +72,7 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
       if (expected == null || expected <= 0) continue;
       const hoursInStage = (now.getTime() - mv.enteredAt.getTime()) / 3_600_000;
       const ratio = hoursInStage / expected;
+
       if (ratio >= SEVERELY_STUCK_MULTIPLIER) {
         candidates.push({
           type: "PIECE_SEVERELY_STUCK",
@@ -101,6 +105,17 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
             enteredAt: mv.enteredAt,
           },
         });
+      }
+
+      // Track any piece that has exceeded expected time (ratio >= 1.0) for STAGE_SLOW
+      if (ratio >= 1.0) {
+        const existing = slowStages.get(mv.toStageCode);
+        if (!existing) {
+          slowStages.set(mv.toStageCode, { worstRatio: ratio, pieceCount: 1 });
+        } else {
+          existing.worstRatio = Math.max(existing.worstRatio, ratio);
+          existing.pieceCount++;
+        }
       }
     }
 
@@ -162,6 +177,22 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
         });
       }
     }
+  }
+
+  // ───── STAGE_SLOW — one alert per stage that has overdue pieces ─────────
+  for (const [stageCode, info] of slowStages) {
+    candidates.push({
+      type: "STAGE_SLOW",
+      severity: "warning",
+      subjectType: "stage",
+      subjectId: stageCode,
+      message: `Stage ${stageCode} is running slow — ${info.pieceCount} piece(s) past expected duration (worst ${info.worstRatio.toFixed(1)}× expected). ETAs recalculated.`,
+      payload: {
+        stageCode,
+        pieceCount: info.pieceCount,
+        worstRatio: info.worstRatio,
+      },
+    });
   }
 
   // ───── DIAMOND SHORTAGES / LOW STOCK ─────
@@ -257,6 +288,18 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
     });
     raised++;
     raisedTypes[c.type] = (raisedTypes[c.type] ?? 0) + 1;
+  }
+
+  // ───── Refresh ETAs for all active job cards ────────────────────────────
+  // Runs after every alert pass so plannedCompletionAt reflects current
+  // stage velocity (slower stages push ETAs out automatically).
+  try {
+    await refreshAllETAs();
+  } catch (err) {
+    // Non-critical — log and continue
+    if (process.env.NODE_ENV !== "test") {
+      console.error("[alertEngine] refreshAllETAs failed:", err);
+    }
   }
 
   return {

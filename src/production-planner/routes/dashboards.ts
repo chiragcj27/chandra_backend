@@ -2,11 +2,13 @@ import { Router } from "express";
 
 import { requireAuth, requireRole } from "../../middleware/requireAuth";
 import { Alert } from "../models/alert";
+import { computeStageVelocityMap } from "../services/production/etaService";
 import { CapacityBaseline } from "../models/capacityBaseline";
 import { GatiColumnMap } from "../models/gatiColumnMap";
 import { JobCard, type JobCardDocument } from "../models/jobCard";
 import { ProductionCalendar } from "../models/productionCalendar";
 import { StageDefinition } from "../models/stageDefinition";
+import { StageMovement } from "../models/stageMovement";
 import { getAnalyticsSnapshot } from "../services/production/analyticsService";
 import type { StageDistributionEntry } from "../types";
 
@@ -43,10 +45,12 @@ interface CapacityPayload {
 
 /**
  * Static config (baselines, stage defs, WIP cell counts, calendar hours).
- * Fetched once per process lifetime — these records change only through
- * deliberate settings updates, not during normal usage.
+ * Expires after CONFIG_TTL_MS so pull-to-refresh always gets fresh data.
+ * Explicitly invalidated after WIP imports and data resets.
  */
 let _configCache: ConfigCache | null = null;
+let _configCacheExpiry = 0;
+const CONFIG_TTL_MS = 2 * 60 * 1000; // 2 minutes
 
 /**
  * Computed capacity result — valid for CAPACITY_TTL_MS.
@@ -60,8 +64,15 @@ export function invalidateCapacityCache(): void {
   _capacityCache = null;
 }
 
+/** Wipe both caches — call after a full data reset or WIP import. */
+export function invalidateAllCaches(): void {
+  _capacityCache     = null;
+  _configCache       = null;
+  _configCacheExpiry = 0;
+}
+
 async function loadConfig(): Promise<ConfigCache> {
-  if (_configCache) return _configCache;
+  if (_configCache && Date.now() < _configCacheExpiry) return _configCache;
 
   const [baselines, stages, wipMap, calendar] = await Promise.all([
     CapacityBaseline.find({ windowDays: 30 })
@@ -97,6 +108,7 @@ async function loadConfig(): Promise<ConfigCache> {
       (calendar as { defaultDailyHours?: number } | null)?.defaultDailyHours ??
       DEFAULT_DAILY_HOURS,
   };
+  _configCacheExpiry = Date.now() + CONFIG_TTL_MS;
   return _configCache;
 }
 
@@ -487,6 +499,151 @@ router.get("/dashboards/summary", requireAuth, requireRole("admin"), async (_req
         total: alertsCount,
         items: recentAlerts,
       },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Server error";
+    return res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * GET /dashboards/capacity — full per-stage capacity breakdown.
+ *
+ * Used by the dedicated Capacity Dashboard screen. Returns all active stages
+ * with their current queue depth and load metrics. Reuses the module-level
+ * config cache so baselines/stages/cells/calendar are fetched at most once
+ * per process lifetime — only a single stageLoadAgg query runs per request.
+ */
+router.get("/dashboards/capacity", requireAuth, requireRole("admin"), async (_req, res) => {
+  try {
+    const now = new Date();
+
+    const [stageLoad, cfg, velocity, overdueAgg] = await Promise.all([
+      JobCard.aggregate<{ _id: string; qty: number }>([
+        { $match: { status: { $in: ["pending", "planned", "in_progress", "on_hold"] } } },
+        { $unwind: "$currentStageDistribution" },
+        {
+          $group: {
+            _id:  "$currentStageDistribution.stageCode",
+            qty:  { $sum: "$currentStageDistribution.qty" },
+          },
+        },
+      ]),
+      loadConfig(),
+      computeStageVelocityMap(),
+      // Count pieces whose time-in-stage has exceeded expectedDurationHours
+      StageMovement.aggregate<{ _id: string; count: number; worstRatio: number }>([
+        { $match: { exitedAt: { $exists: false } } },
+        {
+          $lookup: {
+            from: "stagedefinitions",
+            localField: "toStageCode",
+            foreignField: "code",
+            as: "stageDef",
+          },
+        },
+        { $unwind: "$stageDef" },
+        {
+          $addFields: {
+            hoursInStage: {
+              $divide: [{ $subtract: [now, "$enteredAt"] }, 3_600_000],
+            },
+            expectedHours: "$stageDef.expectedDurationHours",
+          },
+        },
+        {
+          $addFields: {
+            ratio: {
+              $cond: [
+                { $gt: ["$expectedHours", 0] },
+                { $divide: ["$hoursInStage", "$expectedHours"] },
+                0,
+              ],
+            },
+          },
+        },
+        { $match: { ratio: { $gte: 1.0 } } },
+        {
+          $group: {
+            _id: "$toStageCode",
+            count: { $sum: 1 },
+            worstRatio: { $max: "$ratio" },
+          },
+        },
+      ]),
+    ]);
+
+    const queueByStage = new Map<string, number>(stageLoad.map((r) => [r._id, r.qty]));
+    const baselineMap  = new Map(cfg.baselines.map((b) => [b.stageCode, b]));
+    const overdueByStage = new Map(overdueAgg.map((r) => [r._id, r]));
+
+    const stageRows: {
+      stageCode: string;
+      queueUnits: number;
+      capacityPerDay: number;
+      queueDays: number;
+      isBottleneck: boolean;
+      expectedDurationHours: number;
+      velocityFactor: number;
+      overduePieces: number;
+    }[] = [];
+
+    let tightestQueueDays = 0;
+    let tightestQueueUnits = 0;
+    let tightestCapacityPerDay = 0;
+
+    for (const stage of cfg.stages) {
+      const bl = baselineMap.get(stage.code);
+      const unitsPerDay =
+        bl && bl.sampleSize > 0
+          ? bl.unitsPerDay
+          : stage.expectedDurationHours > 0
+          ? cfg.dailyHours / stage.expectedDurationHours
+          : 0;
+
+      const cells = Math.max(cfg.stageCells.get(stage.code) ?? 0, 1);
+      const capacityPerDay = unitsPerDay * cells;
+      const queueUnits = queueByStage.get(stage.code) ?? 0;
+      const queueDays = capacityPerDay > 0 ? queueUnits / capacityPerDay : 0;
+
+      const overdue = overdueByStage.get(stage.code);
+      const velocityFactor = Math.round((velocity.get(stage.code) ?? 1.0) * 100) / 100;
+
+      stageRows.push({
+        stageCode: stage.code,
+        queueUnits,
+        capacityPerDay: Math.round(capacityPerDay * 100) / 100,
+        queueDays: Math.round(queueDays * 10) / 10,
+        isBottleneck: queueDays >= BOTTLENECK_QUEUE_DAYS || (overdue?.count ?? 0) > 0,
+        expectedDurationHours: stage.expectedDurationHours,
+        velocityFactor,
+        overduePieces: overdue?.count ?? 0,
+      });
+
+      if (queueDays > tightestQueueDays) {
+        tightestQueueDays    = queueDays;
+        tightestQueueUnits   = queueUnits;
+        tightestCapacityPerDay = capacityPerDay;
+      }
+    }
+
+    const bottlenecks = stageRows
+      .filter((s) => s.isBottleneck)
+      .sort((a, b) => b.queueDays - a.queueDays);
+
+    const daysLeft = workingDaysLeft();
+    const monthCapacityUnits = tightestCapacityPerDay * daysLeft;
+
+    return res.status(200).json({
+      monthLoad: {
+        pct: monthCapacityUnits > 0
+          ? Math.round((tightestQueueUnits / monthCapacityUnits) * 100)
+          : 0,
+        totalQueueUnits: tightestQueueUnits,
+        monthCapacityUnits: Math.round(monthCapacityUnits * 10) / 10,
+      },
+      stages: stageRows,
+      bottlenecks,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Server error";

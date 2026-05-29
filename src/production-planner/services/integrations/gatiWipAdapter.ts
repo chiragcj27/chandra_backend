@@ -15,6 +15,20 @@ export interface IngestWipInput {
   buffer: Buffer;
   fileName: string;
   uploadedBy?: Types.ObjectId;
+  /**
+   * DEV/TEST ONLY — multiplier applied to each stage's `expectedDurationHours`
+   * to compute a shifted `enteredAt`.
+   *
+   *   enteredAt = now − (expectedDurationHours × testDelayMultiplier)
+   *
+   * e.g. 2.5 → every stage appears 1.5× past its expected time:
+   *   CAD  8h expected  → enteredAt = now−20h → 12h overdue
+   *   GRN  4h expected  → enteredAt = now−10h →  6h overdue
+   *   IGI 48h expected  → enteredAt = now−120h → 72h overdue
+   *
+   * Only honoured when NODE_ENV !== "production".
+   */
+  testDelayMultiplier?: number;
 }
 
 interface MappedStageCell {
@@ -121,6 +135,11 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     const pendingMovements: PendingMovement[] = [];
     const pendingJobCardUpdates: PendingJobCardUpdate[] = [];
     const now = new Date();
+    const isTestDelay =
+      !!input.testDelayMultiplier && process.env.NODE_ENV !== "production";
+    // For new movements in test mode we use now — the per-stage updateMany
+    // at the end will apply the correct stage-proportional shift anyway.
+    const enteredAtStamp = now;
 
     for (const { raw, rowIndex, pieceCode, balanceQty } of validRows) {
       const jobCard = jobCardMap.get(pieceCode);
@@ -167,7 +186,7 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
         const result = await applyWipDiff(
           jobCard, newDistribution, balanceQty,
           { terminalStageCodes, onHoldStageCodes },
-          pendingMovements, pendingJobCardUpdates, now
+          pendingMovements, pendingJobCardUpdates, now, enteredAtStamp
         );
         if (result.changed) updated++;
         else skipped++;
@@ -197,6 +216,47 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
         })),
         { ordered: false }
       );
+    }
+
+    // ── Refresh enteredAt on all still-open movements ────────────────────────
+    // Normal: resets clock to import time ("time since last WIP confirmation").
+    // Test delay: sets enteredAt = now − (expectedDurationHours × multiplier)
+    // per stage, so every stage appears proportionally overdue (not a flat shift).
+    const processedJobCardIds = jobCardList.map((jc) => jc._id);
+    if (processedJobCardIds.length > 0) {
+      if (isTestDelay) {
+        // Per-stage update: each stage gets its own past timestamp so the
+        // delay shown is always (multiplier − 1) × expectedDurationHours.
+        const stageDefs = await StageDefinition.find({ active: true })
+          .select({ code: 1, expectedDurationHours: 1 });
+        await Promise.all(
+          stageDefs.map((s) =>
+            StageMovement.updateMany(
+              {
+                jobCardId:    { $in: processedJobCardIds },
+                toStageCode:  s.code,
+                exitedAt:     { $exists: false },
+              },
+              {
+                $set: {
+                  enteredAt: new Date(
+                    now.getTime() -
+                    s.expectedDurationHours * (input.testDelayMultiplier!) * 3_600_000
+                  ),
+                },
+              }
+            )
+          )
+        );
+      } else {
+        await StageMovement.updateMany(
+          {
+            jobCardId: { $in: processedJobCardIds },
+            exitedAt:  { $exists: false },
+          },
+          { $set: { enteredAt: now } }
+        );
+      }
     }
 
     run.inserted = 0;
@@ -259,7 +319,8 @@ async function applyWipDiff(
   opts: DiffOptions,
   pendingMovements: PendingMovement[],
   pendingJobCardUpdates: PendingJobCardUpdate[],
-  now: Date
+  now: Date,
+  enteredAtStamp: Date = now
 ): Promise<DiffResult> {
   const keyOf = (e: { stageCode: string; cellCode: string }) => `${e.stageCode}|${e.cellCode}`;
   const oldMap = new Map<string, StageDistributionEntry>();
@@ -290,7 +351,7 @@ async function applyWipDiff(
         cellCode,
         fromStageCode: lastStageCode,
         qty: newQty - oldQty,
-        enteredAt: now,
+        enteredAt: enteredAtStamp,
       });
     } else {
       await closeMovements({
