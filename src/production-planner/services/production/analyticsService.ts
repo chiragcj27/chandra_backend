@@ -106,7 +106,7 @@ export async function getAnalyticsSnapshot(
   // ───── Status counts (current state, not range-bound) ─────
   const [inProgressCount, plannedCount, onHoldCount, delayedCount] = await Promise.all([
     JobCard.countDocuments({ status: "in_progress" }),
-    JobCard.countDocuments({ status: "planned" }),
+    JobCard.countDocuments({ status: { $in: ["pending", "planned"] } }),
     JobCard.countDocuments({ status: "on_hold" }),
     JobCard.countDocuments({
       status: { $nin: ["completed", "cancelled"] },

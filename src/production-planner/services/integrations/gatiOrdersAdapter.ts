@@ -2,17 +2,15 @@ import type { Types } from "mongoose";
 
 import { GatiColumnMap, type GatiColumnMapDocument } from "../../models/gatiColumnMap";
 import { GatiImportRun, type GatiImportRunDocument } from "../../models/gatiImportRun";
+import { JobCard, type JobCardDocument } from "../../models/jobCard";
+import { Order } from "../../../models/Order";
 import type { DiamondSpec, FindingEntry, ImportRowError } from "../../types";
 import {
   DEFAULT_ALIASES,
   DEFAULT_ORDER_COLUMNS,
 } from "../bootstrap/columnMapDefaults";
-import { findOrCreateDiamond } from "../inventory/diamondSeedService";
-import {
-  upsertFromOrderImport,
-  type JobCardImportPayload,
-  type UpsertAction,
-} from "../production/jobCardService";
+import { batchSeedDiamonds } from "../inventory/diamondSeedService";
+import type { JobCardImportPayload } from "../production/jobCardService";
 import { parseWorkbookFromBuffer } from "./excelParser";
 import {
   buildGatiPieceCode,
@@ -113,24 +111,134 @@ export async function ingestOrdersFile(
       groups.set(key, list);
     }
 
+    // ── Batch-seed all diamonds in ONE round-trip before processing groups ──
+    // Collect every unique diamond spec across all groups, then bulk upsert.
+    // This replaces N×2-3 serial findOrCreateDiamond calls with 1 query + 1 insertMany.
+    const diamondSpecsForSeed: Array<{ gSize: string; sieve: string; diaSizeMM: number; pointer?: number }> = [];
+    for (const rows of groups.values()) {
+      for (const r of rows) {
+        if (r.kind !== "diamond") continue;
+        const gSize = toStr(r.raw.GSize);
+        const sieve = toStr(r.raw.Size);
+        const diaSizeMM = toNumber(r.raw.DiaSizeMM);
+        const pointer = toNumber(r.raw.Pointer) ?? undefined;
+        if (gSize && sieve && diaSizeMM != null) {
+          diamondSpecsForSeed.push({ gSize, sieve, diaSizeMM, pointer });
+        }
+      }
+    }
+    if (diamondSpecsForSeed.length > 0) await batchSeedDiamonds(diamondSpecsForSeed);
+
+    // ── Two-pass: build all payloads first (pure transform, no DB) ──────────
+    interface ValidPayload { payload: JobCardImportPayload; rowIndex: number }
+    const validPayloads: ValidPayload[] = [];
+    for (const [pieceCode, rows] of groups) {
+      try {
+        const payload = buildGroupPayload(pieceCode, rows);
+        validPayloads.push({ payload, rowIndex: rows[0]?.rowIndex ?? 0 });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "Unknown error";
+        rowErrors.push({ row: rows[0]?.rowIndex ?? 0, reason: `${pieceCode}: ${reason}` });
+      }
+    }
+
+    // ── Bulk fetch existing JobCards + parent Orders in one round-trip each ──
+    const pieceCodes = validPayloads.map((p) => p.payload.gatiPieceCode);
+    const orderNums = [...new Set(validPayloads.map((p) => p.payload.orderNumber))];
+    const [existingList, parentOrderList] = await Promise.all([
+      pieceCodes.length > 0
+        ? JobCard.find({ gatiPieceCode: { $in: pieceCodes } })
+        : Promise.resolve([]),
+      orderNums.length > 0
+        ? Order.find({ orderNumber: { $in: orderNums } }).select({ _id: 1, orderNumber: 1 }).lean()
+        : Promise.resolve([]),
+    ]);
+    const existingMap = new Map<string, JobCardDocument>(
+      (existingList as JobCardDocument[]).map((jc) => [jc.gatiPieceCode, jc])
+    );
+    const parentOrderMap = new Map<string, unknown>(
+      (parentOrderList as Array<{ orderNumber: string; _id: unknown }>).map((o) => [o.orderNumber, o._id])
+    );
+
+    // ── Categorize into inserts, updates, noops ───────────────────────────
+    const toInsert: Record<string, unknown>[] = [];
+    const toUpdate: Array<{ doc: JobCardDocument; payload: JobCardImportPayload }> = [];
     let inserted = 0;
     let updated = 0;
     let skipped = 0;
 
-    // Build a JobCard per group.
-    for (const [pieceCode, rows] of groups) {
+    for (const { payload, rowIndex } of validPayloads) {
       try {
-        const result = await processGroup(pieceCode, rows, columnMap);
-        if (result.action === "inserted") inserted++;
-        else if (result.action === "updated") updated++;
-        else skipped++;
+        const existing = existingMap.get(payload.gatiPieceCode);
+        if (!existing) {
+          toInsert.push({
+            gatiPieceCode: payload.gatiPieceCode,
+            orderNumber: payload.orderNumber,
+            orderItemSrNo: payload.orderItemSrNo,
+            totalQty: payload.totalQty,
+            styleNo: payload.styleNo,
+            size: payload.size,
+            customerCode: payload.customerCode,
+            diamondSpecs: payload.diamondSpecs,
+            totalStones: payload.totalStones,
+            metalType: payload.metalType,
+            metalWeightPerPiece: payload.metalWeightPerPiece,
+            totalMetalWeight: payload.totalMetalWeight,
+            findings: payload.findings,
+            findingsReceived: false,
+            priority: payload.priority ?? "normal",
+            expectedDeliveryAt: payload.expectedDeliveryAt,
+            orderedAt: payload.orderedAt,
+            status: "pending",
+            currentStageDistribution: [
+              { stageCode: "PENDING", cellCode: "PENDING", qty: payload.totalQty },
+            ],
+            chandraOrderId: parentOrderMap.get(payload.orderNumber),
+          });
+          inserted++;
+        } else if (payloadMatchesExisting(payload, existing)) {
+          skipped++;
+        } else {
+          toUpdate.push({ doc: existing, payload });
+          updated++;
+        }
       } catch (err) {
         const reason = err instanceof Error ? err.message : "Unknown error";
-        rowErrors.push({
-          row: rows[0]?.rowIndex ?? 0,
-          reason: `${pieceCode}: ${reason}`,
-        });
+        rowErrors.push({ row: rowIndex, reason: `${payload.gatiPieceCode}: ${reason}` });
       }
+    }
+
+    // ── Flush inserts ─────────────────────────────────────────────────────
+    if (toInsert.length > 0) {
+      await JobCard.insertMany(toInsert, { ordered: false });
+    }
+    // ── Flush updates ─────────────────────────────────────────────────────
+    if (toUpdate.length > 0) {
+      await JobCard.bulkWrite(
+        toUpdate.map(({ doc, payload }) => ({
+          updateOne: {
+            filter: { _id: doc._id },
+            update: {
+              $set: {
+                totalQty: payload.totalQty,
+                styleNo: payload.styleNo,
+                size: payload.size,
+                customerCode: payload.customerCode,
+                diamondSpecs: payload.diamondSpecs,
+                totalStones: payload.totalStones,
+                metalType: payload.metalType,
+                metalWeightPerPiece: payload.metalWeightPerPiece,
+                totalMetalWeight: payload.totalMetalWeight,
+                findings: payload.findings,
+                ...(payload.priority ? { priority: payload.priority } : {}),
+                ...(payload.expectedDeliveryAt ? { expectedDeliveryAt: payload.expectedDeliveryAt } : {}),
+                ...(payload.orderedAt ? { orderedAt: payload.orderedAt } : {}),
+              },
+            },
+          },
+        })),
+        { ordered: false }
+      );
     }
 
     run.inserted = inserted;
@@ -151,11 +259,10 @@ export async function ingestOrdersFile(
   }
 }
 
-async function processGroup(
+function buildGroupPayload(
   pieceCode: string,
   rows: GroupedRow[],
-  _columnMap: GatiColumnMapDocument
-): Promise<{ action: UpsertAction }> {
+): JobCardImportPayload {
   const diamondRows = rows.filter((r) => r.kind === "diamond");
   const metalRows = rows.filter((r) => r.kind === "metal");
   const findingRows = rows.filter((r) => r.kind === "finding");
@@ -213,9 +320,7 @@ async function processGroup(
       totalCaratsPerPiece,
       stonesPerPiece,
     });
-
-    // Auto-seed the Diamond master for this spec.
-    await findOrCreateDiamond({ gSize, sieve, diaSizeMM, pointer });
+    // Diamond master already seeded via batchSeedDiamonds before this loop.
   }
 
   const totalStones = diamondSpecs.reduce((acc, d) => acc + d.stonesPerPiece, 0) * totalQty;
@@ -231,7 +336,7 @@ async function processGroup(
     qty: toNumber(fr.raw.NetWeight) ?? 0,
   }));
 
-  const payload: JobCardImportPayload = {
+  return {
     gatiPieceCode: pieceCode,
     orderNumber,
     orderItemSrNo: srNo,
@@ -248,7 +353,41 @@ async function processGroup(
     expectedDeliveryAt,
     orderedAt,
   };
+}
 
-  const { action } = await upsertFromOrderImport(payload);
-  return { action };
+/**
+ * Deep-equality check on the Order-import-owned fields of a JobCard.
+ * Returns true if the payload already matches the persisted doc (noop).
+ */
+function payloadMatchesExisting(payload: JobCardImportPayload, existing: JobCardDocument): boolean {
+  if (existing.totalQty !== payload.totalQty) return false;
+  if ((existing.styleNo ?? undefined) !== payload.styleNo) return false;
+  if ((existing.size ?? undefined) !== payload.size) return false;
+  if ((existing.customerCode ?? undefined) !== payload.customerCode) return false;
+  if (existing.totalStones !== payload.totalStones) return false;
+  if ((existing.metalType ?? undefined) !== payload.metalType) return false;
+  if (existing.metalWeightPerPiece !== payload.metalWeightPerPiece) return false;
+  if (existing.totalMetalWeight !== payload.totalMetalWeight) return false;
+  const a = payload.expectedDeliveryAt?.getTime() ?? null;
+  const b = existing.expectedDeliveryAt instanceof Date ? existing.expectedDeliveryAt.getTime() : null;
+  if (a !== b) return false;
+  const aOrd = payload.orderedAt?.getTime() ?? null;
+  const bOrd = existing.orderedAt instanceof Date ? existing.orderedAt.getTime() : null;
+  if (aOrd !== bOrd) return false;
+  if ((payload.priority ?? "normal") !== existing.priority) return false;
+  if (existing.diamondSpecs.length !== payload.diamondSpecs.length) return false;
+  for (let i = 0; i < payload.diamondSpecs.length; i++) {
+    const x = payload.diamondSpecs[i];
+    const y = existing.diamondSpecs[i];
+    if (!y) return false;
+    if (x.gSize !== y.gSize || x.sieve !== y.sieve || x.diaSizeMM !== y.diaSizeMM ||
+        x.pointer !== y.pointer || x.totalCaratsPerPiece !== y.totalCaratsPerPiece ||
+        x.stonesPerPiece !== y.stonesPerPiece) return false;
+  }
+  if (existing.findings.length !== payload.findings.length) return false;
+  for (let i = 0; i < payload.findings.length; i++) {
+    if (existing.findings[i]?.code !== payload.findings[i].code ||
+        existing.findings[i]?.qty !== payload.findings[i].qty) return false;
+  }
+  return true;
 }

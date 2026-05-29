@@ -1,18 +1,13 @@
 import type { Types } from "mongoose";
 
-import { GatiColumnMap, type GatiWipColumnEntry } from "../../models/gatiColumnMap";
+import { GatiColumnMap } from "../../models/gatiColumnMap";
 import { GatiImportRun, type GatiImportRunDocument } from "../../models/gatiImportRun";
 import { JobCard, type JobCardDocument } from "../../models/jobCard";
 import { StageDefinition } from "../../models/stageDefinition";
+import { StageMovement } from "../../models/stageMovement";
 import type { ImportRowError, JobCardStatus, StageDistributionEntry } from "../../types";
-import {
-  closeMovements,
-  openMovement,
-} from "../production/stageMovementService";
-import {
-  DEFAULT_ALIASES,
-  DEFAULT_WIP_COLUMNS,
-} from "../bootstrap/columnMapDefaults";
+import { closeMovements } from "../production/stageMovementService";
+import { DEFAULT_WIP_COLUMNS } from "../bootstrap/columnMapDefaults";
 import { parseWorkbookFromBuffer } from "./excelParser";
 import { toNumber, toStr } from "./columnMapper";
 
@@ -28,13 +23,14 @@ interface MappedStageCell {
 }
 
 /**
- * Read the WIP Excel/CSV, diff each row against the JobCard's current state,
- * append the resulting StageMovement records, and update the JobCard.
+ * Read the WIP ("What Is Where") Excel, diff each row against the JobCard's
+ * current state, append StageMovement records, and update the JobCard.
  *
- * - Skips header + the trailing "Customer Order Total" row.
- * - Bad rows go into `run.rowErrors[]`; the import as a whole still completes.
- * - Unmapped stage columns are reported in `run.unmappedColumns[]` so the admin
- *   can update the column map without losing the rest of the import.
+ * GatiSOFT "What Is Where" file format:
+ *   Row 1  — "Grand Total" merged header (skipped by parser)
+ *   Row 2  — Column headers: Book Name | OrderNo+SrNo | Style No | BalanceQty | …stage cols…
+ *   Row 3+ — One row per piece; OrderNo+SrNo = gatiPieceCode (e.g. CO/REG/26-27/0112/1)
+ *   Last   — Totals row: Book Name = "Customer Order Total", OrderNo+SrNo = blank
  *
  * Returns the persisted GatiImportRun.
  */
@@ -50,11 +46,22 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
   });
 
   try {
-    // Load column map; build lookups
-    const columnMap = await GatiColumnMap.findOne({ fileType: "wip", active: true });
+    // Load (or auto-create) the active WIP column map.
+    let columnMap = await GatiColumnMap.findOne({ fileType: "wip", active: true });
+    if (!columnMap) {
+      columnMap = await GatiColumnMap.create({
+        fileType: "wip",
+        version: 1,
+        aliases: {},
+        orderColumns: [],
+        wipColumns: DEFAULT_WIP_COLUMNS.map((c) => ({ ...c })),
+        active: true,
+      });
+    }
+
+    // Build rawColumn → { stageCode, cellCode } lookup.
     const stageCellByColumn = new Map<string, MappedStageCell>();
-    for (const entry of (columnMap?.wipColumns ?? []) as GatiWipColumnEntry[]) {
-      // Skip pending entries (no stageCode/cellCode yet) — they count as unmapped
+    for (const entry of columnMap.wipColumns) {
       if (!entry.stageCode || !entry.cellCode) continue;
       stageCellByColumn.set(entry.rawColumn.trim(), {
         stageCode: entry.stageCode,
@@ -65,7 +72,7 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     // Discovered stage codes for terminal/hold detection
     const stages = await StageDefinition.find({ active: true });
     const terminalStageCodes = new Set(stages.filter((s) => s.isTerminal).map((s) => s.code));
-    const onHoldStageCodes = new Set(["HOLD"]); // simple convention; can be data-driven later
+    const onHoldStageCodes = new Set(["HOLD"]);
 
     const parsed = parseWorkbookFromBuffer(input.buffer);
     run.rowCount = parsed.rowCount;
@@ -73,13 +80,10 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     const rowErrors: ImportRowError[] = [];
     const unmappedColumns = new Set<string>();
 
-    // WIP imports never insert JobCards (those come from the Order import) — they
-    // only update existing ones. `inserted` stays 0; we track update/skip.
     let updated = 0;
     let skipped = 0;
 
-    // The reserved (non-stage) columns we know about — used to skip them when
-    // walking each row's stage columns.
+    // Non-stage columns — skip when walking stage columns.
     const RESERVED_COLUMNS = new Set([
       "Book Name",
       "OrderNo+SrNo",
@@ -89,25 +93,41 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
       "OnFloor",
     ]);
 
+    // ── First pass: collect valid rows ───────────────────────────────────────
+    // "OrderNo+SrNo" = gatiPieceCode (e.g. "CO/REG/26-27/0112/1").
+    // Totals row has blank OrderNo+SrNo — filtered by !pieceCode check.
+    interface ValidWipRow {
+      raw: Record<string, unknown>;
+      rowIndex: number;
+      pieceCode: string;
+      balanceQty: number;
+    }
+    const validRows: ValidWipRow[] = [];
     for (let i = 0; i < parsed.rows.length; i++) {
       const raw = parsed.rows[i];
-      const rowIndex = i + 2;
-
       const pieceCode = toStr(raw["OrderNo+SrNo"]);
-      const bookName = toStr(raw["Book Name"]);
-
-      // Skip totals row ("Customer Order Total") and other footer/summary rows
-      // (heuristic: footer rows have no piece code and a label like "Total" in Book Name).
       if (!pieceCode) continue;
-      if (bookName && /total/i.test(bookName) && !pieceCode.includes("/")) continue;
+      validRows.push({ raw, rowIndex: i + 2, pieceCode, balanceQty: toNumber(raw.BalanceQty) ?? 0 });
+    }
 
-      const balanceQty = toNumber(raw.BalanceQty) ?? 0;
+    // ── Single DB round-trip for all job cards ───────────────────────────────
+    const jobCardList = await JobCard.find({
+      gatiPieceCode: { $in: validRows.map((r) => r.pieceCode) },
+    });
+    const jobCardMap = new Map<string, JobCardDocument>(
+      jobCardList.map((jc) => [jc.gatiPieceCode, jc])
+    );
 
-      const jobCard = await JobCard.findOne({ gatiPieceCode: pieceCode });
+    const pendingMovements: PendingMovement[] = [];
+    const pendingJobCardUpdates: PendingJobCardUpdate[] = [];
+    const now = new Date();
+
+    for (const { raw, rowIndex, pieceCode, balanceQty } of validRows) {
+      const jobCard = jobCardMap.get(pieceCode);
       if (!jobCard) {
         rowErrors.push({
           row: rowIndex,
-          reason: `JobCard not found for ${pieceCode} — upload the Order Excel first`,
+          reason: `No job card found for ${pieceCode} — upload the Order Excel first`,
         });
         continue;
       }
@@ -140,14 +160,15 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
           row: rowIndex,
           reason: `${pieceCode}: one or more stage columns are not mapped — update the WIP column map`,
         });
-        // We still process the mapped portion so partial progress is recorded.
+        // Still process the mapped portion so partial progress is recorded.
       }
 
       try {
-        const result = await applyWipDiff(jobCard, newDistribution, balanceQty, {
-          terminalStageCodes,
-          onHoldStageCodes,
-        });
+        const result = await applyWipDiff(
+          jobCard, newDistribution, balanceQty,
+          { terminalStageCodes, onHoldStageCodes },
+          pendingMovements, pendingJobCardUpdates, now
+        );
         if (result.changed) updated++;
         else skipped++;
       } catch (err) {
@@ -156,35 +177,26 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
       }
     }
 
-    // ── Auto-discover: persist newly-seen stage columns (with blank codes) so
-    //    the admin can fill them in on the Column Maps screen.
-    if (unmappedColumns.size > 0) {
-      let targetMap = columnMap;
-      if (!targetMap) {
-        targetMap = await GatiColumnMap.create({
-          fileType: "wip",
-          version: 1,
-          aliases: DEFAULT_ALIASES,
-          orderColumns: [],
-          wipColumns: DEFAULT_WIP_COLUMNS.map((c) => ({ ...c })),
-          active: true,
-        });
-      }
-      const existingRaws = new Set(
-        (targetMap.wipColumns as GatiWipColumnEntry[]).map((c) => c.rawColumn.trim())
+    // ── Flush batch writes ───────────────────────────────────────────────────
+    if (pendingMovements.length > 0) {
+      await StageMovement.insertMany(pendingMovements, { ordered: false });
+    }
+    if (pendingJobCardUpdates.length > 0) {
+      await JobCard.bulkWrite(
+        pendingJobCardUpdates.map((u) => ({
+          updateOne: {
+            filter: { _id: u.id },
+            update: {
+              $set: {
+                currentStageDistribution: u.currentStageDistribution,
+                status: u.status,
+                ...(u.actualCompletionAt ? { actualCompletionAt: u.actualCompletionAt } : {}),
+              },
+            },
+          },
+        })),
+        { ordered: false }
       );
-      let mapChanged = false;
-      for (const col of unmappedColumns) {
-        if (!existingRaws.has(col.trim())) {
-          (targetMap.wipColumns as GatiWipColumnEntry[]).push({
-            rawColumn: col.trim(),
-            stageCode: "",
-            cellCode: "",
-          });
-          mapChanged = true;
-        }
-      }
-      if (mapChanged) await targetMap.save();
     }
 
     run.inserted = 0;
@@ -215,19 +227,40 @@ interface DiffResult {
   changed: boolean;
 }
 
+/** Pending open-movement to be batch-inserted after the row loop. */
+interface PendingMovement {
+  jobCardId: Types.ObjectId;
+  gatiPieceCode: string;
+  toStageCode: string;
+  cellCode: string;
+  fromStageCode?: string;
+  qty: number;
+  enteredAt: Date;
+}
+
+/** Pending job-card update to be batch-written after the row loop. */
+interface PendingJobCardUpdate {
+  id: Types.ObjectId;
+  currentStageDistribution: StageDistributionEntry[];
+  status: JobCardStatus;
+  actualCompletionAt?: Date;
+}
+
 /**
- * Diff one JobCard's new distribution against its current state, write the
- * resulting StageMovement records, and update the JobCard.
+ * Diff one JobCard's new distribution against its current state.
+ *
+ * - Close movements (qty reduced) are written immediately — FIFO reads committed state.
+ * - Open movements (qty increased) and JobCard saves are deferred for bulk flush.
  */
 async function applyWipDiff(
   jobCard: JobCardDocument,
   newDistribution: StageDistributionEntry[],
   balanceQty: number,
-  opts: DiffOptions
+  opts: DiffOptions,
+  pendingMovements: PendingMovement[],
+  pendingJobCardUpdates: PendingJobCardUpdate[],
+  now: Date
 ): Promise<DiffResult> {
-  const now = new Date();
-
-  // Build key-indexed maps for diffing.
   const keyOf = (e: { stageCode: string; cellCode: string }) => `${e.stageCode}|${e.cellCode}`;
   const oldMap = new Map<string, StageDistributionEntry>();
   for (const e of jobCard.currentStageDistribution) oldMap.set(keyOf(e), e);
@@ -235,9 +268,6 @@ async function applyWipDiff(
   for (const e of newDistribution) newMap.set(keyOf(e), e);
 
   const allKeys = new Set<string>([...oldMap.keys(), ...newMap.keys()]);
-
-  // Find the most-recent stage the piece had been at, used as `fromStageCode`
-  // on opening movements — purely informational.
   const lastStageCode = jobCard.currentStageDistribution[0]?.stageCode;
 
   let changed = false;
@@ -253,54 +283,55 @@ async function applyWipDiff(
     changed = true;
 
     if (newQty > oldQty) {
-      const delta = newQty - oldQty;
-      await openMovement({
+      pendingMovements.push({
         jobCardId: jobCard._id as Types.ObjectId,
         gatiPieceCode: jobCard.gatiPieceCode,
         toStageCode: stageCode,
         cellCode,
         fromStageCode: lastStageCode,
-        qty: delta,
+        qty: newQty - oldQty,
         enteredAt: now,
       });
     } else {
-      const delta = oldQty - newQty;
       await closeMovements({
         jobCardId: jobCard._id as Types.ObjectId,
         gatiPieceCode: jobCard.gatiPieceCode,
         stageCode,
         cellCode,
-        qty: delta,
+        qty: oldQty - newQty,
         exitedAt: now,
       });
     }
   }
 
-  // Update JobCard state.
-  jobCard.currentStageDistribution = newDistribution;
-
+  // Compute next status.
   const totalQtyInDistribution = newDistribution.reduce((acc, e) => acc + e.qty, 0);
-  const allTerminal = newDistribution.length > 0 && newDistribution.every((e) => opts.terminalStageCodes.has(e.stageCode));
+  const allTerminal = newDistribution.length > 0 &&
+    newDistribution.every((e) => opts.terminalStageCodes.has(e.stageCode));
   const anyHold = newDistribution.some((e) => opts.onHoldStageCodes.has(e.stageCode));
 
   let nextStatus: JobCardStatus = jobCard.status;
   if (balanceQty === 0 || (allTerminal && totalQtyInDistribution >= jobCard.totalQty)) {
     nextStatus = "completed";
-    if (!jobCard.actualCompletionAt) jobCard.actualCompletionAt = now;
   } else if (anyHold) {
     nextStatus = "on_hold";
   } else if (newDistribution.length > 0) {
     nextStatus = "in_progress";
   } else {
-    nextStatus = "planned";
+    nextStatus = "pending";
   }
 
-  if (nextStatus !== jobCard.status) {
-    jobCard.status = nextStatus;
-    changed = true;
-  }
+  if (nextStatus !== jobCard.status) changed = true;
 
-  if (changed) await jobCard.save();
+  if (changed) {
+    pendingJobCardUpdates.push({
+      id: jobCard._id as Types.ObjectId,
+      currentStageDistribution: newDistribution,
+      status: nextStatus,
+      actualCompletionAt:
+        nextStatus === "completed" && !jobCard.actualCompletionAt ? now : undefined,
+    });
+  }
 
   return { changed };
 }

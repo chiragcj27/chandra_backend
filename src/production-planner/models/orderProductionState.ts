@@ -24,7 +24,7 @@ const OrderProductionStateSchema = new Schema<OrderProductionStateDocument>(
     aggregateStatus: {
       type: String,
       enum: ORDER_AGGREGATE_STATUSES,
-      default: "planned",
+      default: "pending",
       index: true,
     },
     jobCardCount: { type: Number, default: 0, min: 0 },

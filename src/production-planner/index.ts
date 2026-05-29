@@ -1,10 +1,10 @@
 import { Router } from "express";
 
+import devResetRouter from "./routes/devReset";
 import alertsRouter from "./routes/alerts";
 import allocationsRouter from "./routes/allocations";
 import anomaliesRouter from "./routes/anomalies";
 import calendarRouter from "./routes/calendar";
-import cellsRouter from "./routes/cells";
 import columnMapsRouter from "./routes/columnMaps";
 import dashboardsRouter from "./routes/dashboards";
 import diamondsRouter from "./routes/diamonds";
@@ -19,9 +19,9 @@ import movementsRouter from "./routes/movements";
 import planningRouter from "./routes/planning";
 import purchaseOrdersRouter from "./routes/purchaseOrders";
 import requirementsRouter from "./routes/requirements";
-import seatsRouter from "./routes/seats";
 import stagesRouter from "./routes/stages";
 import whatIfRouter from "./routes/whatIf";
+import { seedDefaultStages } from "./services/bootstrap/seedDefaultData";
 
 /**
  * Production Planner module router.
@@ -29,7 +29,7 @@ import whatIfRouter from "./routes/whatIf";
  * Mounted at `/admin/production` from `routes/admin/index.ts`.
  * All routes are admin-only (each sub-router applies requireAuth + requireRole("admin")).
  *
- * Phase 0: configuration CRUD (stages, cells, seats, calendar, column-maps).
+ * Phase 0: configuration CRUD (stages, calendar, column-maps).
  * Phase 1: Order Excel import, JobCard read APIs, Diamond admin CRUD.
  * Phase 2: WIP Excel import, StageMovements, order-grouped tracking dashboards, alert engine.
  * Phase 3: capacity baselines, planning calculator, bottleneck detection, what-if simulator.
@@ -40,10 +40,13 @@ import whatIfRouter from "./routes/whatIf";
  */
 const router = Router();
 
+// Seed predefined stages into DB on startup (idempotent — never overwrites admin edits).
+seedDefaultStages().catch((err) =>
+  console.error("[ProductionPlanner] Stage seed error:", (err as Error).message)
+);
+
 // Phase 0
 router.use(stagesRouter);
-router.use(cellsRouter);
-router.use(seatsRouter);
 router.use(calendarRouter);
 router.use(columnMapsRouter);
 
@@ -73,5 +76,8 @@ router.use(purchaseOrdersRouter);
 
 // Phase 5
 router.use(anomaliesRouter);
+
+// Dev utilities (reset all imported data — keep stages & diamond masters)
+router.use(devResetRouter);
 
 export default router;

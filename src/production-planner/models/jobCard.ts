@@ -89,7 +89,7 @@ const JobCardSchema = new Schema<JobCardDocument>(
     findingsReceivedAt: { type: Date },
     priority: { type: String, enum: PRIORITY_LEVELS, default: "normal", index: true },
     expectedDeliveryAt: { type: Date, index: true },
-    status: { type: String, enum: JOB_CARD_STATUSES, default: "planned", index: true },
+    status: { type: String, enum: JOB_CARD_STATUSES, default: "pending", index: true },
     currentStageDistribution: { type: [StageDistributionEntrySchema], default: [] },
     plannedCompletionAt: { type: Date },
     actualCompletionAt: { type: Date },
