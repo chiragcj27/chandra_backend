@@ -135,8 +135,9 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     const pendingMovements: PendingMovement[] = [];
     const pendingJobCardUpdates: PendingJobCardUpdate[] = [];
     const now = new Date();
-    const isTestDelay =
-      !!input.testDelayMultiplier && process.env.NODE_ENV !== "production";
+    // NODE_ENV guard is already enforced in importsWip.ts before the multiplier
+    // is set — if it reached here, it was explicitly allowed.
+    const isTestDelay = !!input.testDelayMultiplier;
     // For new movements in test mode we use now — the per-stage updateMany
     // at the end will apply the correct stage-proportional shift anyway.
     const enteredAtStamp = now;
