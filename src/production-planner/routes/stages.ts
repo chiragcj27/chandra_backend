@@ -111,8 +111,77 @@ router.put("/stages/:code", requireAuth, requireRole("admin"), async (req, res) 
     const description = asTrimmedString(body.description);
     if (typeof body.description === "string") stage.description = description;
 
+    // Replace duration rules if provided
+    if (Array.isArray(body.durationRules)) {
+      stage.durationRules = (body.durationRules as Array<Record<string, unknown>>)
+        .filter(
+          (r) =>
+            Number.isFinite(Number(r.weightMin)) &&
+            Number.isFinite(Number(r.weightMax)) &&
+            Number.isFinite(Number(r.hours))
+        )
+        .map((r) => ({
+          category:    typeof r.category    === "string" ? r.category.trim()    : "",
+          weightLabel: typeof r.weightLabel === "string" ? r.weightLabel.trim() : "",
+          weightMin:   Number(r.weightMin),
+          weightMax:   Number(r.weightMax),
+          hours:       Number(r.hours),
+        }));
+    }
+
     await stage.save();
     return res.status(200).json({ stage });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * PUT /stages/:code/duration-rules
+ * Replace all duration rules for a stage in one call.
+ * Body: [{ category, weightMin, weightMax, hours }, ...]
+ */
+router.put("/stages/:code/duration-rules", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const stage = await StageDefinition.findOne({ code: String(req.params.code).toUpperCase() });
+    if (!stage) return res.status(404).json({ error: "Stage not found" });
+
+    const body = req.body;
+    if (!Array.isArray(body)) return res.status(400).json({ error: "Body must be an array of rules" });
+
+    stage.durationRules = body
+      .filter(
+        (r) =>
+          Number.isFinite(Number(r?.weightMin)) &&
+          Number.isFinite(Number(r?.weightMax)) &&
+          Number.isFinite(Number(r?.hours))
+      )
+      .map((r) => ({
+        category:    typeof r.category    === "string" ? r.category.trim()    : "",
+        weightLabel: typeof r.weightLabel === "string" ? r.weightLabel.trim() : "",
+        weightMin:   Number(r.weightMin),
+        weightMax:   Number(r.weightMax),
+        hours:       Number(r.hours),
+      }));
+
+    await stage.save();
+    return res.status(200).json({ stage });
+  } catch {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * DELETE /stages/:code/duration-rules
+ * Clear all duration rules (revert to flat expectedDurationHours).
+ */
+router.delete("/stages/:code/duration-rules", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const stage = await StageDefinition.findOne({ code: String(req.params.code).toUpperCase() });
+    if (!stage) return res.status(404).json({ error: "Stage not found" });
+    stage.durationRules = [];
+    await stage.save();
+    return res.status(200).json({ ok: true, stage });
   } catch {
     return res.status(500).json({ error: "Server error" });
   }

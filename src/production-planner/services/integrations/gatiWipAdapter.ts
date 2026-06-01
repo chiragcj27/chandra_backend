@@ -83,10 +83,14 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
       });
     }
 
-    // Discovered stage codes for terminal/hold detection
-    const stages = await StageDefinition.find({ active: true });
+    // Discovered stage codes for terminal/hold detection + stage flow for smart enteredAt
+    const stages = await StageDefinition.find({ active: true }).sort({ displayOrder: 1 });
     const terminalStageCodes = new Set(stages.filter((s) => s.isTerminal).map((s) => s.code));
-    const onHoldStageCodes = new Set(["HOLD"]);
+    const onHoldStageCodes   = new Set(["HOLD"]);
+    // Main flow stages (displayOrder 1–89) used for skip detection
+    const stageFlow = stages
+      .filter((s) => s.displayOrder >= 1 && s.displayOrder < 90)
+      .map((s) => ({ code: s.code, expectedDurationHours: s.expectedDurationHours, displayOrder: s.displayOrder }));
 
     const parsed = parseWorkbookFromBuffer(input.buffer);
     run.rowCount = parsed.rowCount;
@@ -131,6 +135,21 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     const jobCardMap = new Map<string, JobCardDocument>(
       jobCardList.map((jc) => [jc.gatiPieceCode, jc])
     );
+
+    // ── Pre-load all open movements for these job cards ───────────────────────
+    // Used to get prevConfirmedAt (enteredAt of closing movement) for smart
+    // enteredAt estimation when stages are skipped between WIP imports.
+    const existingOpenMovements = jobCardList.length > 0
+      ? await StageMovement.find({
+          jobCardId: { $in: jobCardList.map((jc) => jc._id) },
+          exitedAt:  { $exists: false },
+        }).select({ jobCardId: 1, toStageCode: 1, enteredAt: 1 })
+      : [];
+    // key: `${jobCardId}_${stageCode}` → enteredAt (last WIP confirmation time)
+    const prevEnteredAtMap = new Map<string, Date>();
+    for (const m of existingOpenMovements) {
+      prevEnteredAtMap.set(`${m.jobCardId.toString()}_${m.toStageCode}`, m.enteredAt);
+    }
 
     const pendingMovements: PendingMovement[] = [];
     const pendingJobCardUpdates: PendingJobCardUpdate[] = [];
@@ -187,7 +206,8 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
         const result = await applyWipDiff(
           jobCard, newDistribution, balanceQty,
           { terminalStageCodes, onHoldStageCodes },
-          pendingMovements, pendingJobCardUpdates, now, enteredAtStamp
+          pendingMovements, pendingJobCardUpdates, now, enteredAtStamp,
+          stageFlow, prevEnteredAtMap, isTestDelay
         );
         if (result.changed) updated++;
         else skipped++;
@@ -225,6 +245,9 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     // per stage, so every stage appears proportionally overdue (not a flat shift).
     const processedJobCardIds = jobCardList.map((jc) => jc._id);
     if (processedJobCardIds.length > 0) {
+      // Only refresh enteredAt for movements that existed BEFORE this import.
+      // Newly created movements already have smart proportional enteredAt set.
+      const importStartedAt = startedAt; // captured at top of ingestWipFile
       if (isTestDelay) {
         // Per-stage update: each stage gets its own past timestamp so the
         // delay shown is always (multiplier − 1) × expectedDurationHours.
@@ -250,10 +273,14 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
           )
         );
       } else {
+        // Only update pre-existing open movements (unchanged stages).
+        // Newly inserted movements (createdAt >= importStartedAt) already
+        // have their smart proportional enteredAt — don't overwrite them.
         await StageMovement.updateMany(
           {
             jobCardId: { $in: processedJobCardIds },
             exitedAt:  { $exists: false },
+            createdAt: { $lt: importStartedAt },
           },
           { $set: { enteredAt: now } }
         );
@@ -282,6 +309,63 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
 interface DiffOptions {
   terminalStageCodes: Set<string>;
   onHoldStageCodes: Set<string>;
+}
+
+interface StageFlowEntry {
+  code: string;
+  expectedDurationHours: number;
+  displayOrder: number;
+}
+
+/**
+ * Smart enteredAt estimation when a piece skips multiple stages between WIP imports.
+ *
+ * Formula (proportional distribution):
+ *   estimatedEnteredAt = prevConfirmedAt + elapsed × (E_before / E_total)
+ *
+ * Where:
+ *   prevConfirmedAt = when piece was last confirmed at fromStage
+ *   elapsed         = importTime - prevConfirmedAt
+ *   E_before        = sum of expectedHours for all stages FROM fromStage up to (not including) toStage
+ *   E_total         = E_before + expectedHours of toStage
+ *
+ * Example:
+ *   10 AM at CAD → 10 AM+24h WIP shows at POL
+ *   E_before = CAD(8)+CAM(4)+WAX(8)+WAX_SET(6)+CASTING(12)+CENTERING(4)+GRN(4)+REFINING(6)+FILING(8)+ASSEMBLE(6) = 66h
+ *   E_total  = 66 + 6 = 72h
+ *   fraction = 66/72 = 0.917
+ *   estimatedEnteredAt = 10 AM + 24h × 0.917 = 10 AM + 22h = 8 AM next day
+ *   → piece is 2h at POL when WIP is imported (vs 6h expected) — not overdue yet ✅
+ *
+ * Rework (backward movement): uses importTime (fresh timer, QC_REWORK alert handles flagging).
+ */
+function computeSmartEnteredAt(
+  fromCode: string | undefined,
+  toCode: string,
+  importTime: Date,
+  prevConfirmedAt: Date,
+  stageFlow: StageFlowEntry[]
+): Date {
+  if (!fromCode) return importTime;
+
+  const fromIdx = stageFlow.findIndex((s) => s.code === fromCode);
+  const toIdx   = stageFlow.findIndex((s) => s.code === toCode);
+
+  // Not found, adjacent (normal progression), or rework (backward) → use import time
+  if (fromIdx === -1 || toIdx === -1 || toIdx <= fromIdx + 1) return importTime;
+
+  // Sum expected hours from fromStage up to (not including) toStage
+  let E_before = 0;
+  for (let i = fromIdx; i < toIdx; i++) E_before += stageFlow[i].expectedDurationHours;
+  const E_total = E_before + stageFlow[toIdx].expectedDurationHours;
+  if (E_total === 0) return importTime;
+
+  const elapsedMs  = importTime.getTime() - prevConfirmedAt.getTime();
+  const fraction   = E_before / E_total;
+  const estimated  = new Date(prevConfirmedAt.getTime() + elapsedMs * fraction);
+
+  // Must be strictly before import time (at least 1 min gap so delay calc isn't zero)
+  return estimated < importTime ? estimated : new Date(importTime.getTime() - 60_000);
 }
 
 interface DiffResult {
@@ -321,7 +405,10 @@ async function applyWipDiff(
   pendingMovements: PendingMovement[],
   pendingJobCardUpdates: PendingJobCardUpdate[],
   now: Date,
-  enteredAtStamp: Date = now
+  enteredAtStamp: Date = now,
+  stageFlow: StageFlowEntry[] = [],
+  prevEnteredAtMap: Map<string, Date> = new Map(),
+  skipSmartEnteredAt = false    // true in test-delay mode — use enteredAtStamp as-is
 ): Promise<DiffResult> {
   const keyOf = (e: { stageCode: string; cellCode: string }) => `${e.stageCode}|${e.cellCode}`;
   const oldMap = new Map<string, StageDistributionEntry>();
@@ -345,6 +432,15 @@ async function applyWipDiff(
     changed = true;
 
     if (newQty > oldQty) {
+      // If stages were skipped, estimate enteredAt proportionally.
+      // For adjacent moves or rework (backward), enteredAtStamp is used as-is.
+      const prevConfirmedAt = prevEnteredAtMap.get(
+        `${(jobCard._id as Types.ObjectId).toString()}_${lastStageCode ?? ""}`
+      ) ?? enteredAtStamp;
+      const smartEnteredAt = skipSmartEnteredAt
+        ? enteredAtStamp  // test delay mode: use the shifted stamp as-is
+        : computeSmartEnteredAt(lastStageCode, stageCode, enteredAtStamp, prevConfirmedAt, stageFlow);
+
       pendingMovements.push({
         jobCardId: jobCard._id as Types.ObjectId,
         gatiPieceCode: jobCard.gatiPieceCode,
@@ -352,7 +448,7 @@ async function applyWipDiff(
         cellCode,
         fromStageCode: lastStageCode,
         qty: newQty - oldQty,
-        enteredAt: enteredAtStamp,
+        enteredAt: smartEnteredAt,
       });
     } else {
       await closeMovements({

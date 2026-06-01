@@ -21,8 +21,46 @@
  */
 
 import { JobCard } from "../../models/jobCard";
-import { StageDefinition } from "../../models/stageDefinition";
+import { StageDefinition, type DurationRule } from "../../models/stageDefinition";
 import { StageMovement } from "../../models/stageMovement";
+import { resolveItemCategory } from "../integrations/columnMapper";
+
+/**
+ * Look up the expected duration for a specific item at a stage.
+ *
+ * Priority:
+ *   1. Rule matching category + weight range  → use rule.hours
+ *   2. Rule matching any category ("") + weight range → use rule.hours
+ *   3. Fallback → stage.expectedDurationHours
+ */
+export function getExpectedHours(
+  stage: { expectedDurationHours: number; durationRules?: DurationRule[] },
+  itemCategory: string | undefined,
+  weightGrams: number
+): number {
+  const rules = stage.durationRules;
+  if (!rules?.length) return stage.expectedDurationHours;
+
+  const weight = weightGrams ?? 0;
+
+  // 1. Category + weight match
+  const exact = rules.find(
+    (r) =>
+      r.category === (itemCategory ?? "") &&
+      weight >= r.weightMin &&
+      weight <= r.weightMax
+  );
+  if (exact) return exact.hours;
+
+  // 2. Any-category rule + weight match
+  const anyCat = rules.find(
+    (r) => r.category === "" && weight >= r.weightMin && weight <= r.weightMax
+  );
+  if (anyCat) return anyCat.hours;
+
+  // 3. Fallback
+  return stage.expectedDurationHours;
+}
 
 const VELOCITY_LOOKBACK_DAYS = 30;
 
@@ -87,9 +125,7 @@ export async function computeStageVelocityMap(
 export async function refreshAllETAs(): Promise<{ updated: number }> {
   const now = new Date();
 
-  // ── 1. Load stages — prefer main flow (displayOrder 1–89), but keep ALL
-  //    active stages as a fallback so job cards whose currentStageDistribution
-  //    still has old/renamed codes (e.g. PRE_POLISH → POL) still get an ETA.
+  // ── 1. Load stages with durationRules for per-item expected-hours lookup ──
   const allStages = await StageDefinition.find({ active: true }).sort({
     displayOrder: 1,
   });
@@ -117,10 +153,10 @@ export async function refreshAllETAs(): Promise<{ updated: number }> {
     movLookup.set(`${m.jobCardId.toString()}_${m.toStageCode}`, m.enteredAt);
   }
 
-  // ── 4. Active job cards ───────────────────────────────────────────────────
+  // ── 4. Active job cards — include category + weight for rule lookup ────────
   const jobCards = await JobCard.find({
     status: { $in: ["pending", "planned", "in_progress", "on_hold"] },
-  }).select({ _id: 1, currentStageDistribution: 1 });
+  }).select({ _id: 1, currentStageDistribution: 1, itemCategory: 1, styleNo: 1, metalWeightPerPiece: 1 });
 
   // ── 5. Compute ETA per job card ───────────────────────────────────────────
   const bulkOps: object[] = [];
@@ -160,10 +196,19 @@ export async function refreshAllETAs(): Promise<{ updated: number }> {
 
     for (let i = startIdx; i < flowStages.length; i++) {
       const stage = flowStages[i];
-      const expected = stage.expectedDurationHours;
+
+      // Resolve category: explicit field first, then parse from styleNo prefix
+      const resolvedCat = resolveItemCategory(
+        (jc as { itemCategory?: string }).itemCategory,
+        (jc as { styleNo?: string }).styleNo
+      );
+      const expected = getExpectedHours(
+        stage,
+        resolvedCat,
+        (jc as { metalWeightPerPiece?: number }).metalWeightPerPiece ?? 0
+      );
       if (expected <= 0) continue;
 
-      // velocity clamped to [0.5, ∞) — never predict faster than half expected
       const vf = Math.max(velocity.get(stage.code) ?? 1.0, 0.5);
       const adjustedHours = expected * vf;
 

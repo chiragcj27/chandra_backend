@@ -26,6 +26,8 @@ export const DEFAULT_ORDER_COLUMNS = [
   { rawColumn: "DiaSizeMM",          fieldPath: "_diamond.diaSizeMM" },
   { rawColumn: "Pointer",            fieldPath: "_diamond.pointer" },
   { rawColumn: "NetWeight",          fieldPath: "_netWeight" },
+  // Optional — if the order Excel has an item-category column, map it here
+  { rawColumn: "ItemCategory",       fieldPath: "itemCategory" },
 ];
 
 /**
