@@ -24,6 +24,7 @@ import { JobCard } from "../../models/jobCard";
 import { StageDefinition, type DurationRule } from "../../models/stageDefinition";
 import { StageMovement } from "../../models/stageMovement";
 import { resolveItemCategory } from "../integrations/columnMapper";
+import { calculateSettingTimeHours, getTotalDiamondCarats, SETTING_STAGE_CODES } from "./settingTimeTable";
 
 /**
  * Look up the expected duration for a specific item at a stage.
@@ -156,7 +157,7 @@ export async function refreshAllETAs(): Promise<{ updated: number }> {
   // ── 4. Active job cards — include category + weight for rule lookup ────────
   const jobCards = await JobCard.find({
     status: { $in: ["pending", "planned", "in_progress", "on_hold"] },
-  }).select({ _id: 1, currentStageDistribution: 1, itemCategory: 1, styleNo: 1, metalWeightPerPiece: 1 });
+  }).select({ _id: 1, currentStageDistribution: 1, itemCategory: 1, styleNo: 1, metalWeightPerPiece: 1, totalQty: 1, perPcPieces: 1, diamondSpecs: 1 });
 
   // ── 5. Compute ETA per job card ───────────────────────────────────────────
   const bulkOps: object[] = [];
@@ -197,16 +198,21 @@ export async function refreshAllETAs(): Promise<{ updated: number }> {
     for (let i = startIdx; i < flowStages.length; i++) {
       const stage = flowStages[i];
 
-      // Resolve category: explicit field first, then parse from styleNo prefix
-      const resolvedCat = resolveItemCategory(
-        (jc as { itemCategory?: string }).itemCategory,
-        (jc as { styleNo?: string }).styleNo
-      );
-      const expected = getExpectedHours(
-        stage,
-        resolvedCat,
-        (jc as { metalWeightPerPiece?: number }).metalWeightPerPiece ?? 0
-      );
+      // For DIA_SET / SETTING: use qty × diaSizeMM formula
+      // For all other stages: use durationRules → fallback to expectedDurationHours
+      let expected: number;
+      if (SETTING_STAGE_CODES.has(stage.code)) {
+        const diaCarats   = getTotalDiamondCarats((jc as { diamondSpecs?: { totalCaratsPerPiece: number }[] }).diamondSpecs);
+        const perPcPieces = (jc as { perPcPieces?: number }).perPcPieces;
+        const totalQty    = (jc as { totalQty?: number }).totalQty;
+        expected = calculateSettingTimeHours(perPcPieces, totalQty, diaCarats, stage.expectedDurationHours);
+      } else {
+        const resolvedCat = resolveItemCategory(
+          (jc as { itemCategory?: string }).itemCategory,
+          (jc as { styleNo?: string }).styleNo
+        );
+        expected = getExpectedHours(stage, resolvedCat, (jc as { metalWeightPerPiece?: number }).metalWeightPerPiece ?? 0);
+      }
       if (expected <= 0) continue;
 
       const vf = Math.max(velocity.get(stage.code) ?? 1.0, 0.5);

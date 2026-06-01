@@ -18,6 +18,7 @@ export interface JobCardImportPayload {
   size?: string;
   customerCode?: string;
   itemCategory?: string;
+  perPcPieces?: number;
   diamondSpecs: DiamondSpec[];
   totalStones: number;
   metalType?: string;

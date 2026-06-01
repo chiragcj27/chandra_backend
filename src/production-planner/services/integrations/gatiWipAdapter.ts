@@ -7,6 +7,7 @@ import { StageDefinition } from "../../models/stageDefinition";
 import { StageMovement } from "../../models/stageMovement";
 import type { ImportRowError, JobCardStatus, StageDistributionEntry } from "../../types";
 import { closeMovements } from "../production/stageMovementService";
+import { calculateSettingTimeHours, getTotalDiamondCarats, SETTING_STAGE_CODES } from "../production/settingTimeTable";
 import { DEFAULT_WIP_COLUMNS } from "../bootstrap/columnMapDefaults";
 import { parseWorkbookFromBuffer } from "./excelParser";
 import { toNumber, toStr } from "./columnMapper";
@@ -203,11 +204,25 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
       }
 
       try {
-        const result = await applyWipDiff(
+        // Build job-card-specific stage flow: override DIA_SET/SETTING expected hours
+      // using the qty × diaSizeMM formula so smart enteredAt uses accurate timing.
+      const jcDiaCarats = getTotalDiamondCarats(jobCard.diamondSpecs as { totalCaratsPerPiece: number }[]);
+      const jcStageFlow = stageFlow.map((s) =>
+        SETTING_STAGE_CODES.has(s.code) && jcDiaCarats
+          ? { ...s, expectedDurationHours: calculateSettingTimeHours(
+              (jobCard as { perPcPieces?: number }).perPcPieces,
+              jobCard.totalQty,
+              jcDiaCarats,
+              s.expectedDurationHours
+            )}
+          : s
+      );
+
+      const result = await applyWipDiff(
           jobCard, newDistribution, balanceQty,
           { terminalStageCodes, onHoldStageCodes },
           pendingMovements, pendingJobCardUpdates, now, enteredAtStamp,
-          stageFlow, prevEnteredAtMap, isTestDelay
+          jcStageFlow, prevEnteredAtMap, isTestDelay
         );
         if (result.changed) updated++;
         else skipped++;

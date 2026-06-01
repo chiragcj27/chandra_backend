@@ -180,6 +180,7 @@ export async function ingestOrdersFile(
             size: payload.size,
             customerCode: payload.customerCode,
             itemCategory: payload.itemCategory,
+            perPcPieces:  payload.perPcPieces,
             diamondSpecs: payload.diamondSpecs,
             totalStones: payload.totalStones,
             metalType: payload.metalType,
@@ -226,6 +227,7 @@ export async function ingestOrdersFile(
                 size: payload.size,
                 customerCode: payload.customerCode,
                 ...(payload.itemCategory !== undefined ? { itemCategory: payload.itemCategory } : {}),
+                ...(payload.perPcPieces  !== undefined ? { perPcPieces:  payload.perPcPieces  } : {}),
                 diamondSpecs: payload.diamondSpecs,
                 totalStones: payload.totalStones,
                 metalType: payload.metalType,
@@ -292,6 +294,7 @@ function buildGroupPayload(
   const size = toStr(anchor.ItmItemSizeName);
   const customerCode = toStr(anchor.Customer);
   const itemCategory = toStr(anchor.ItemCategory) ?? undefined;
+  const perPcPieces  = toNumber(anchor.PerPc_Pieces) ?? undefined;
   const orderedAt = parseGatiDate(anchor.OrderDate) ?? undefined;
   const expectedDeliveryAt = parseGatiDate(anchor.ItmPrdDelDate) ?? undefined;
 
@@ -348,6 +351,7 @@ function buildGroupPayload(
     size,
     customerCode,
     itemCategory,
+    perPcPieces,
     diamondSpecs,
     totalStones,
     metalType,
