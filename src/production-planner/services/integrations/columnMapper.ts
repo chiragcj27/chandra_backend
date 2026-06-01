@@ -93,3 +93,94 @@ export function parseGatiDate(s: unknown): Date | null {
 export function buildGatiPieceCode(orderNumber: string, srNo: number): string {
   return `${orderNumber}/${srNo}`;
 }
+
+/**
+ * Style-code token → jewelry category mapping.
+ * The category code can appear ANYWHERE in the style number
+ * (start, middle, end) — e.g. "001R", "R-001", "RNG-001", "001-R-05".
+ *
+ * How it works:
+ *   1. Split styleNo by separators (-, _, /, space, .)
+ *   2. Strip digits from each token → pure letter token
+ *   3. Exact-match the letter token against this map (longest key wins)
+ *
+ * Add more codes as your style numbering evolves.
+ */
+const STYLE_CODE_MAP: Record<string, string> = {
+  // 3-char codes (checked first — more specific)
+  RNG: "Ring",
+  BNG: "Bangle",
+  BRC: "Bracelet",
+  NCK: "Necklace",
+  PND: "Pendant",
+  EAR: "Earring",
+  CHN: "Chain",
+  MGS: "Mangalsutra",
+  ANK: "Anklet",
+  KDA: "Kada",
+  // 2-char codes
+  RG: "Ring",
+  BN: "Bangle",
+  BR: "Bracelet",
+  NK: "Necklace",
+  PD: "Pendant",
+  ER: "Earring",
+  CH: "Chain",
+  MG: "Mangalsutra",
+  AK: "Anklet",
+  KD: "Kada",
+  // 1-char codes
+  R: "Ring",
+  B: "Bracelet",
+  A: "Anklet",
+  E: "Earring",
+  P: "Pendant",
+  N: "Necklace",
+  C: "Chain",
+  K: "Kada",
+  M: "Mangalsutra",
+};
+
+/**
+ * Resolve the jewelry category for a job card.
+ *
+ * Priority:
+ *   1. `itemCategory` if explicitly set on the job card (from order import)
+ *   2. Split styleNo by separators, strip digits from each token,
+ *      then exact-match against STYLE_CODE_MAP (longest match wins)
+ *   3. undefined — no category could be determined
+ *
+ * Examples:
+ *   "R-001"      → "R"   → Ring
+ *   "001-R"      → "R"   → Ring
+ *   "R1042"      → "R"   → Ring
+ *   "RNG001"     → "RNG" → Ring
+ *   "001-BNG-05" → "BNG" → Bangle
+ *   "BNGRING"    → no clean split → no match (ambiguous, skip)
+ */
+export function resolveItemCategory(
+  itemCategory: string | undefined,
+  styleNo: string | undefined
+): string | undefined {
+  if (itemCategory?.trim()) return itemCategory.trim();
+  if (!styleNo?.trim()) return undefined;
+
+  const s = styleNo.trim().toUpperCase();
+
+  // Split on separators and also on digit/letter boundaries
+  // e.g. "R001"  → ["R", "001"]
+  //      "001R"  → ["001", "R"]
+  //      "BNG-01" → ["BNG", "01"]
+  const parts = s
+    .split(/[-_\/\s.]+/)          // split by explicit separators
+    .flatMap((p) => p.split(/(?=[A-Z])(?<=[0-9])|(?=[0-9])(?<=[A-Z])/)); // split on digit↔letter boundary
+
+  for (const part of parts) {
+    const letters = part.replace(/\d/g, "").trim();
+    if (!letters) continue;
+    // Exact match only — avoids partial matches like "CAD" → "C" (Chain)
+    if (STYLE_CODE_MAP[letters]) return STYLE_CODE_MAP[letters];
+  }
+
+  return undefined;
+}

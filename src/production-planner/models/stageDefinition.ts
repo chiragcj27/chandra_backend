@@ -2,11 +2,27 @@ import { Document, Schema, model, models, type Model } from "mongoose";
 
 import { UNIT_OF_WORK, type UnitOfWork } from "../types";
 
+/** Per-category + weight-range override for expectedDurationHours. */
+export interface DurationRule {
+  /** Jewelry category, e.g. "Ring". Empty string = applies to all categories. */
+  category: string;
+  /** Human-readable weight label, e.g. "5-10g". Used for display only. */
+  weightLabel: string;
+  /** Minimum metal weight in grams (inclusive). Use 0 for no lower bound. */
+  weightMin: number;
+  /** Maximum metal weight in grams (inclusive). Use 9999 for no upper bound. */
+  weightMax: number;
+  /** Expected duration in hours for this combination. */
+  hours: number;
+}
+
 export interface StageDefinitionDocument extends Document {
   code: string;
   name: string;
   expectedDurationHours: number;
   expectedDurationStdDevHours?: number;
+  /** Per-category/weight overrides. Falls back to expectedDurationHours if no rule matches. */
+  durationRules: DurationRule[];
   dependencies: string[];
   parallelGroup?: string;
   unitOfWork: UnitOfWork;
@@ -25,6 +41,17 @@ const StageDefinitionSchema = new Schema<StageDefinitionDocument>(
     name: { type: String, required: true, trim: true },
     expectedDurationHours: { type: Number, required: true, min: 0, default: 24 },
     expectedDurationStdDevHours: { type: Number, min: 0 },
+    durationRules: {
+      type: [{
+        category:    { type: String, default: "" },
+        weightLabel: { type: String, default: "" },
+        weightMin:   { type: Number, required: true, min: 0, default: 0 },
+        weightMax:   { type: Number, required: true, min: 0, default: 9999 },
+        hours:       { type: Number, required: true, min: 0 },
+        _id: false,
+      }],
+      default: [],
+    },
     dependencies: { type: [String], default: [] },
     parallelGroup: { type: String, trim: true },
     unitOfWork: { type: String, required: true, enum: UNIT_OF_WORK, default: "piece" },

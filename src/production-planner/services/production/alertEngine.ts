@@ -5,7 +5,8 @@ import { StageMovement } from "../../models/stageMovement";
 import { buildRequirementsTable } from "../inventory/requirementsService";
 import type { AlertSeverity, AlertType } from "../../types";
 import { detectAnomalies } from "./anomalyDetector";
-import { refreshAllETAs } from "./etaService";
+import { refreshAllETAs, getExpectedHours } from "./etaService";
+import { resolveItemCategory } from "../integrations/columnMapper";
 
 /** How much past `expectedDurationHours` is considered "stuck" / "severely stuck". */
 const STUCK_MULTIPLIER = 2.0;
@@ -44,10 +45,9 @@ export interface AlertRunSummary {
 export async function runAlertRules(): Promise<AlertRunSummary> {
   const now = new Date();
 
-  // Stages → expectedDurationHours (active only)
+  // Stages — load durationRules too so per-item expected hours work
   const stages = await StageDefinition.find({ active: true });
-  const expectedHoursByStage = new Map<string, number>();
-  for (const s of stages) expectedHoursByStage.set(s.code, s.expectedDurationHours);
+  const stageByCode = new Map(stages.map((s) => [s.code, s]));
   const stageOrderByCode = new Map<string, number>();
   for (const s of stages) stageOrderByCode.set(s.code, s.displayOrder);
 
@@ -68,8 +68,11 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
       exitedAt: { $exists: false },
     });
     for (const mv of openMovs) {
-      const expected = expectedHoursByStage.get(mv.toStageCode);
-      if (expected == null || expected <= 0) continue;
+      const stage = stageByCode.get(mv.toStageCode);
+      if (!stage) continue;
+      const resolvedCat = resolveItemCategory(jc.itemCategory, jc.styleNo);
+      const expected = getExpectedHours(stage, resolvedCat, jc.metalWeightPerPiece ?? 0);
+      if (expected <= 0) continue;
       const hoursInStage = (now.getTime() - mv.enteredAt.getTime()) / 3_600_000;
       const ratio = hoursInStage / expected;
 

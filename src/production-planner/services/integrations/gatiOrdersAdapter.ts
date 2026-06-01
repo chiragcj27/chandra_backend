@@ -179,6 +179,7 @@ export async function ingestOrdersFile(
             styleNo: payload.styleNo,
             size: payload.size,
             customerCode: payload.customerCode,
+            itemCategory: payload.itemCategory,
             diamondSpecs: payload.diamondSpecs,
             totalStones: payload.totalStones,
             metalType: payload.metalType,
@@ -224,6 +225,7 @@ export async function ingestOrdersFile(
                 styleNo: payload.styleNo,
                 size: payload.size,
                 customerCode: payload.customerCode,
+                ...(payload.itemCategory !== undefined ? { itemCategory: payload.itemCategory } : {}),
                 diamondSpecs: payload.diamondSpecs,
                 totalStones: payload.totalStones,
                 metalType: payload.metalType,
@@ -289,6 +291,7 @@ function buildGroupPayload(
   const styleNo = toStr(anchor.StyleCode_Repeat);
   const size = toStr(anchor.ItmItemSizeName);
   const customerCode = toStr(anchor.Customer);
+  const itemCategory = toStr(anchor.ItemCategory) ?? undefined;
   const orderedAt = parseGatiDate(anchor.OrderDate) ?? undefined;
   const expectedDeliveryAt = parseGatiDate(anchor.ItmPrdDelDate) ?? undefined;
 
@@ -344,6 +347,7 @@ function buildGroupPayload(
     styleNo,
     size,
     customerCode,
+    itemCategory,
     diamondSpecs,
     totalStones,
     metalType,

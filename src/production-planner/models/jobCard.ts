@@ -19,6 +19,8 @@ export interface JobCardDocument extends Document {
   styleNo?: string;
   size?: string;
   customerCode?: string;
+  /** Jewelry category, e.g. "Ring", "Bangle" — used for per-category duration rules. */
+  itemCategory?: string;
   diamondSpecs: DiamondSpec[];
   totalStones: number;
   metalType?: string;
@@ -79,6 +81,7 @@ const JobCardSchema = new Schema<JobCardDocument>(
     styleNo: { type: String, trim: true, index: true },
     size: { type: String, trim: true },
     customerCode: { type: String, trim: true, index: true },
+    itemCategory: { type: String, trim: true, index: true },
     diamondSpecs: { type: [DiamondSpecSchema], default: [] },
     totalStones: { type: Number, default: 0, min: 0 },
     metalType: { type: String, trim: true },
