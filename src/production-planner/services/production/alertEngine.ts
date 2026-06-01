@@ -7,6 +7,7 @@ import type { AlertSeverity, AlertType } from "../../types";
 import { detectAnomalies } from "./anomalyDetector";
 import { refreshAllETAs, getExpectedHours } from "./etaService";
 import { resolveItemCategory } from "../integrations/columnMapper";
+import { calculateSettingTimeHours, getTotalDiamondCarats, SETTING_STAGE_CODES } from "./settingTimeTable";
 
 /** How much past `expectedDurationHours` is considered "stuck" / "severely stuck". */
 const STUCK_MULTIPLIER = 2.0;
@@ -52,9 +53,11 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
   for (const s of stages) stageOrderByCode.set(s.code, s.displayOrder);
 
   // Consider all JobCards not yet completed/cancelled.
+  // Include totalQty + diamondSpecs for setting-time formula.
   const openJobCards = await JobCard.find({
     status: { $in: ["pending", "planned", "in_progress", "on_hold"] },
-  });
+  }).select({ gatiPieceCode: 1, orderNumber: 1, status: 1, expectedDeliveryAt: 1,
+    itemCategory: 1, styleNo: 1, metalWeightPerPiece: 1, totalQty: 1, perPcPieces: 1, diamondSpecs: 1 });
 
   const candidates: AlertCandidate[] = [];
   // Track stages that have at least one piece overdue (> 1× expected)
@@ -70,8 +73,14 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
     for (const mv of openMovs) {
       const stage = stageByCode.get(mv.toStageCode);
       if (!stage) continue;
-      const resolvedCat = resolveItemCategory(jc.itemCategory, jc.styleNo);
-      const expected = getExpectedHours(stage, resolvedCat, jc.metalWeightPerPiece ?? 0);
+      let expected: number;
+      if (SETTING_STAGE_CODES.has(mv.toStageCode)) {
+        const diaCarats = getTotalDiamondCarats(jc.diamondSpecs as { totalCaratsPerPiece: number }[] | undefined);
+        expected = calculateSettingTimeHours(jc.perPcPieces, jc.totalQty, diaCarats, stage.expectedDurationHours);
+      } else {
+        const resolvedCat = resolveItemCategory(jc.itemCategory, jc.styleNo);
+        expected = getExpectedHours(stage, resolvedCat, jc.metalWeightPerPiece ?? 0);
+      }
       if (expected <= 0) continue;
       const hoursInStage = (now.getTime() - mv.enteredAt.getTime()) / 3_600_000;
       const ratio = hoursInStage / expected;

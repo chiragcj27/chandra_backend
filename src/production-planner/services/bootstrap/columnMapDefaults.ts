@@ -28,6 +28,8 @@ export const DEFAULT_ORDER_COLUMNS = [
   { rawColumn: "NetWeight",          fieldPath: "_netWeight" },
   // Optional — if the order Excel has an item-category column, map it here
   { rawColumn: "ItemCategory",       fieldPath: "itemCategory" },
+  // Diamonds per piece — used for setting-stage time calculation
+  { rawColumn: "PerPc_Pieces",       fieldPath: "perPcPieces" },
 ];
 
 /**
