@@ -5,9 +5,12 @@
  */
 
 export const DEFAULT_ALIASES = {
-  diamond: ["LABGROWN DIAMOND", "NATURAL DIAMOND", "DIAMOND", "LAB GROWN DIAMOND"],
-  metal: ["GOLD", "PLATINUM", "SILVER"],
-  finding: ["FINDING", "FINDINGS"],
+  diamond: [
+    "LABGROWN DIAMOND", "NATURAL DIAMOND", "DIAMOND", "LAB GROWN DIAMOND",
+    "MOISSANITE DIAMOND", "MOISSANITE", "CVD DIAMOND", "CUBIC ZIRCONIA", "CZ",
+  ],
+  metal: ["GOLD", "PLATINUM", "SILVER", "ROSE GOLD", "WHITE GOLD"],
+  finding: ["FINDING", "FINDINGS", "SILVER FINDING", "GOLD FINDING", "PLATINUM FINDING"],
 };
 
 export const DEFAULT_ORDER_COLUMNS = [
@@ -26,7 +29,8 @@ export const DEFAULT_ORDER_COLUMNS = [
   { rawColumn: "DiaSizeMM",          fieldPath: "_diamond.diaSizeMM" },
   { rawColumn: "Pointer",            fieldPath: "_diamond.pointer" },
   { rawColumn: "NetWeight",          fieldPath: "_netWeight" },
-  // Optional — if the order Excel has an item-category column, map it here
+  // Jewelry category — supports both column name variants
+  { rawColumn: "Category",           fieldPath: "itemCategory" },
   { rawColumn: "ItemCategory",       fieldPath: "itemCategory" },
   // Diamonds per piece — used for setting-stage time calculation
   { rawColumn: "PerPc_Pieces",       fieldPath: "perPcPieces" },

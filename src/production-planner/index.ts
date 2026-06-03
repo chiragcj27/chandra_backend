@@ -20,6 +20,7 @@ import planningRouter from "./routes/planning";
 import purchaseOrdersRouter from "./routes/purchaseOrders";
 import requirementsRouter from "./routes/requirements";
 import stagesRouter from "./routes/stages";
+import schedulingRouter from "./scheduling";
 import whatIfRouter from "./routes/whatIf";
 import { seedDefaultStages } from "./services/bootstrap/seedDefaultData";
 import { refreshAllETAs } from "./services/production/etaService";
@@ -85,6 +86,9 @@ router.use(purchaseOrdersRouter);
 
 // Phase 5
 router.use(anomaliesRouter);
+
+// Phase 6 — Production scheduler
+router.use(schedulingRouter);
 
 // Dev utilities (reset all imported data — keep stages & diamond masters)
 router.use(devResetRouter);

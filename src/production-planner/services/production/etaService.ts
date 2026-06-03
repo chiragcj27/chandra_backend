@@ -24,7 +24,7 @@ import { JobCard } from "../../models/jobCard";
 import { StageDefinition, type DurationRule } from "../../models/stageDefinition";
 import { StageMovement } from "../../models/stageMovement";
 import { resolveItemCategory } from "../integrations/columnMapper";
-import { calculateSettingTimeHours, getTotalDiamondCarats, SETTING_STAGE_CODES } from "./settingTimeTable";
+import { calculateSettingTimeHours, getTotalDiamondCarats, resolvePerPcPieces, SETTING_STAGE_CODES } from "./settingTimeTable";
 
 /**
  * Look up the expected duration for a specific item at a stage.
@@ -37,27 +37,37 @@ import { calculateSettingTimeHours, getTotalDiamondCarats, SETTING_STAGE_CODES }
 export function getExpectedHours(
   stage: { expectedDurationHours: number; durationRules?: DurationRule[] },
   itemCategory: string | undefined,
-  weightGrams: number
+  weightGrams: number,
+  actualQty?: number
 ): number {
   const rules = stage.durationRules;
   if (!rules?.length) return stage.expectedDurationHours;
 
   const weight = weightGrams ?? 0;
 
-  // 1. Category + weight match
+  const applyRule = (r: DurationRule): number => {
+    // If rule has a reference qty > 1, apply proportional formula
+    if (r.qty && r.qty > 1 && actualQty && actualQty > 0) {
+      return (actualQty / r.qty) * r.hours;
+    }
+    return r.hours;
+  };
+
+  // 1. Category + weight match (case-insensitive — Excel sends uppercase, rules saved mixed)
+  const catLower = (itemCategory ?? "").toLowerCase();
   const exact = rules.find(
     (r) =>
-      r.category === (itemCategory ?? "") &&
+      r.category.toLowerCase() === catLower &&
       weight >= r.weightMin &&
       weight <= r.weightMax
   );
-  if (exact) return exact.hours;
+  if (exact) return applyRule(exact);
 
   // 2. Any-category rule + weight match
   const anyCat = rules.find(
     (r) => r.category === "" && weight >= r.weightMin && weight <= r.weightMax
   );
-  if (anyCat) return anyCat.hours;
+  if (anyCat) return applyRule(anyCat);
 
   // 3. Fallback
   return stage.expectedDurationHours;
@@ -198,20 +208,32 @@ export async function refreshAllETAs(): Promise<{ updated: number }> {
     for (let i = startIdx; i < flowStages.length; i++) {
       const stage = flowStages[i];
 
-      // For DIA_SET / SETTING: use qty × diaSizeMM formula
-      // For all other stages: use durationRules → fallback to expectedDurationHours
-      let expected: number;
+      // Gap 1: ETA sums expected hours from current stage → remaining stages
+      //   This cumulative approach matches the Stage Delay formula:
+      //   Expected Till Current = Σ(Expected from Start to Current)
+      //   (Start-to-current is computed in the frontend's stageAnalysis;
+      //    this backend function handles current-stage→end for ETA projection.)
+      //
+      // Gap 3 fix: Setting stage Expected = Category+Weight Time + Stone Qty×Carat Time
+      //   cat+wt time → from duration rules (category+weight match) or stage.expectedDurationHours
+      //   stone time   → from SETTING_TIME_TABLE lookup by carats × qty
+      const resolvedCat = resolveItemCategory(
+        (jc as { itemCategory?: string }).itemCategory,
+        (jc as { styleNo?: string }).styleNo
+      );
+      const catWtTime = getExpectedHours(
+        stage, resolvedCat,
+        (jc as { metalWeightPerPiece?: number }).metalWeightPerPiece ?? 0,
+        (jc as { totalQty?: number }).totalQty
+      );
+      let expected = catWtTime;
       if (SETTING_STAGE_CODES.has(stage.code)) {
-        const diaCarats   = getTotalDiamondCarats((jc as { diamondSpecs?: { totalCaratsPerPiece: number }[] }).diamondSpecs);
-        const perPcPieces = (jc as { perPcPieces?: number }).perPcPieces;
-        const totalQty    = (jc as { totalQty?: number }).totalQty;
-        expected = calculateSettingTimeHours(perPcPieces, totalQty, diaCarats, stage.expectedDurationHours);
-      } else {
-        const resolvedCat = resolveItemCategory(
-          (jc as { itemCategory?: string }).itemCategory,
-          (jc as { styleNo?: string }).styleNo
+        const nw = getTotalDiamondCarats((jc as { diamondSpecs?: { totalCaratsPerPiece: number }[] }).diamondSpecs);
+        const pp = resolvePerPcPieces(
+          (jc as { perPcPieces?: number }).perPcPieces,
+          (jc as { diamondSpecs?: { stonesPerPiece: number }[] }).diamondSpecs
         );
-        expected = getExpectedHours(stage, resolvedCat, (jc as { metalWeightPerPiece?: number }).metalWeightPerPiece ?? 0);
+        expected += calculateSettingTimeHours(nw, pp, 0);
       }
       if (expected <= 0) continue;
 

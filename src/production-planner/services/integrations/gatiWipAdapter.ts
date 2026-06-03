@@ -7,10 +7,11 @@ import { StageDefinition } from "../../models/stageDefinition";
 import { StageMovement } from "../../models/stageMovement";
 import type { ImportRowError, JobCardStatus, StageDistributionEntry } from "../../types";
 import { closeMovements } from "../production/stageMovementService";
-import { calculateSettingTimeHours, getTotalDiamondCarats, SETTING_STAGE_CODES } from "../production/settingTimeTable";
+
 import { DEFAULT_WIP_COLUMNS } from "../bootstrap/columnMapDefaults";
 import { parseWorkbookFromBuffer } from "./excelParser";
 import { toNumber, toStr } from "./columnMapper";
+import { calculateSettingTimeHours, getTotalDiamondCarats, resolvePerPcPieces, SETTING_STAGE_CODES } from "../production/settingTimeTable";
 
 export interface IngestWipInput {
   buffer: Buffer;
@@ -204,19 +205,16 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
       }
 
       try {
-        // Build job-card-specific stage flow: override DIA_SET/SETTING expected hours
-      // using the qty × diaSizeMM formula so smart enteredAt uses accurate timing.
-      const jcDiaCarats = getTotalDiamondCarats(jobCard.diamondSpecs as { totalCaratsPerPiece: number }[]);
-      const jcStageFlow = stageFlow.map((s) =>
-        SETTING_STAGE_CODES.has(s.code) && jcDiaCarats
-          ? { ...s, expectedDurationHours: calculateSettingTimeHours(
-              (jobCard as { perPcPieces?: number }).perPcPieces,
-              jobCard.totalQty,
-              jcDiaCarats,
-              s.expectedDurationHours
-            )}
-          : s
-      );
+        const jcDiaCarats = getTotalDiamondCarats(jobCard.diamondSpecs as { totalCaratsPerPiece: number }[]);
+        const jcDiaStones = resolvePerPcPieces(
+          (jobCard as { perPcPieces?: number }).perPcPieces,
+          (jobCard as { diamondSpecs?: { stonesPerPiece: number }[] }).diamondSpecs
+        );
+        const jcStageFlow = stageFlow.map((s) =>
+          SETTING_STAGE_CODES.has(s.code) && jcDiaCarats && jcDiaStones
+            ? { ...s, expectedDurationHours: calculateSettingTimeHours(jcDiaCarats, jcDiaStones, s.expectedDurationHours) }
+            : s
+        );
 
       const result = await applyWipDiff(
           jobCard, newDistribution, balanceQty,
@@ -436,6 +434,14 @@ async function applyWipDiff(
 
   let changed = false;
 
+  // Track close operations that need the smart date from corresponding opens
+  const pendingCloses: Array<{
+    stageCode: string;
+    cellCode: string;
+    qty: number;
+    enteredAt: Date;
+  }> = [];
+
   for (const key of allKeys) {
     const oldEntry = oldMap.get(key);
     const newEntry = newMap.get(key);
@@ -465,16 +471,47 @@ async function applyWipDiff(
         qty: newQty - oldQty,
         enteredAt: smartEnteredAt,
       });
+
+      // Close the previous stage's movement with the SAME timestamp
+      // so its duration isn't inflated by time spent in subsequent stages.
+      if (lastStageCode) {
+        const prevQty = oldMap.get(`${lastStageCode}|${cellCode}`)?.qty;
+        if (prevQty != null && prevQty > 0) {
+          pendingCloses.push({
+            stageCode: lastStageCode,
+            cellCode,
+            qty: Math.min(newQty - oldQty, prevQty),
+            enteredAt: smartEnteredAt,
+          });
+        }
+      }
     } else {
-      await closeMovements({
-        jobCardId: jobCard._id as Types.ObjectId,
-        gatiPieceCode: jobCard.gatiPieceCode,
-        stageCode,
-        cellCode,
-        qty: oldQty - newQty,
-        exitedAt: now,
-      });
+      // Close remaining qty that didn't move to lastStageCode (other reductions)
+      const alreadyClosing = pendingCloses
+        .filter((c) => c.stageCode === stageCode && c.cellCode === cellCode)
+        .reduce((sum, c) => sum + c.qty, 0);
+      const remainingQty = oldQty - newQty - alreadyClosing;
+      if (remainingQty > 0) {
+        pendingCloses.push({
+          stageCode,
+          cellCode,
+          qty: remainingQty,
+          enteredAt: now,
+        });
+      }
     }
+  }
+
+  // Flush all pending closes with their correct timestamps
+  for (const pc of pendingCloses) {
+    await closeMovements({
+      jobCardId: jobCard._id as Types.ObjectId,
+      gatiPieceCode: jobCard.gatiPieceCode,
+      stageCode: pc.stageCode,
+      cellCode: pc.cellCode,
+      qty: pc.qty,
+      exitedAt: pc.enteredAt,
+    });
   }
 
   // Compute next status.
