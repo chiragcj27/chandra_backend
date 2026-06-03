@@ -56,10 +56,19 @@ function asWipColumns(x: unknown): GatiWipColumnEntry[] | undefined {
     const cellCode = typeof obj.cellCode === "string" ? obj.cellCode.trim().toUpperCase() : "";
     // Only rawColumn is required — stageCode/cellCode may be blank for pending entries
     if (rawColumn) {
-      out.push({ rawColumn, stageCode, cellCode });
+      out.push({
+        rawColumn,
+        stageCode,
+        cellCode,
+        strength: typeof obj.strength === "number" && obj.strength >= 1 ? obj.strength : randomStrength(),
+      });
     }
   }
   return out;
+}
+
+function randomStrength(): number {
+  return Math.floor(Math.random() * 5) + 1; // 1–5 persons
 }
 
 router.get("/column-maps/:fileType", requireAuth, requireRole("admin"), async (req, res) => {

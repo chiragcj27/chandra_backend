@@ -12,7 +12,13 @@ export interface DurationRule {
   weightMin: number;
   /** Maximum metal weight in grams (inclusive). Use 9999 for no upper bound. */
   weightMax: number;
-  /** Expected duration in hours for this combination. */
+  /**
+   * Reference quantity for the proportional formula.
+   * If > 1: expectedTime = (actualQty / qty) × hours
+   * If 0 or 1: hours is returned directly (no scaling).
+   */
+  qty: number;
+  /** Expected hours for `qty` pieces of this category+weight. */
   hours: number;
 }
 
@@ -20,6 +26,7 @@ export interface StageDefinitionDocument extends Document {
   code: string;
   name: string;
   expectedDurationHours: number;
+  unitsPerWorkerHours: number;
   expectedDurationStdDevHours?: number;
   /** Per-category/weight overrides. Falls back to expectedDurationHours if no rule matches. */
   durationRules: DurationRule[];
@@ -40,6 +47,7 @@ const StageDefinitionSchema = new Schema<StageDefinitionDocument>(
     code: { type: String, required: true, unique: true, trim: true, uppercase: true, index: true },
     name: { type: String, required: true, trim: true },
     expectedDurationHours: { type: Number, required: true, min: 0, default: 24 },
+    unitsPerWorkerHours: { type: Number, min: 0, default: 0 },
     expectedDurationStdDevHours: { type: Number, min: 0 },
     durationRules: {
       type: [{
@@ -47,6 +55,7 @@ const StageDefinitionSchema = new Schema<StageDefinitionDocument>(
         weightLabel: { type: String, default: "" },
         weightMin:   { type: Number, required: true, min: 0, default: 0 },
         weightMax:   { type: Number, required: true, min: 0, default: 9999 },
+        qty:         { type: Number, min: 0, default: 1 },
         hours:       { type: Number, required: true, min: 0 },
         _id: false,
       }],

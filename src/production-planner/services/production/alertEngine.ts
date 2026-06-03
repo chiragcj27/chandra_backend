@@ -7,7 +7,7 @@ import type { AlertSeverity, AlertType } from "../../types";
 import { detectAnomalies } from "./anomalyDetector";
 import { refreshAllETAs, getExpectedHours } from "./etaService";
 import { resolveItemCategory } from "../integrations/columnMapper";
-import { calculateSettingTimeHours, getTotalDiamondCarats, SETTING_STAGE_CODES } from "./settingTimeTable";
+import { calculateSettingTimeHours, getTotalDiamondCarats, resolvePerPcPieces, SETTING_STAGE_CODES } from "./settingTimeTable";
 
 /** How much past `expectedDurationHours` is considered "stuck" / "severely stuck". */
 const STUCK_MULTIPLIER = 2.0;
@@ -73,13 +73,12 @@ export async function runAlertRules(): Promise<AlertRunSummary> {
     for (const mv of openMovs) {
       const stage = stageByCode.get(mv.toStageCode);
       if (!stage) continue;
-      let expected: number;
+      const resolvedCat = resolveItemCategory(jc.itemCategory, jc.styleNo);
+      let expected = getExpectedHours(stage, resolvedCat, jc.metalWeightPerPiece ?? 0, jc.totalQty);
       if (SETTING_STAGE_CODES.has(mv.toStageCode)) {
-        const diaCarats = getTotalDiamondCarats(jc.diamondSpecs as { totalCaratsPerPiece: number }[] | undefined);
-        expected = calculateSettingTimeHours(jc.perPcPieces, jc.totalQty, diaCarats, stage.expectedDurationHours);
-      } else {
-        const resolvedCat = resolveItemCategory(jc.itemCategory, jc.styleNo);
-        expected = getExpectedHours(stage, resolvedCat, jc.metalWeightPerPiece ?? 0);
+        const nw = getTotalDiamondCarats(jc.diamondSpecs as { totalCaratsPerPiece: number }[] | undefined);
+        const pp = resolvePerPcPieces(jc.perPcPieces, jc.diamondSpecs as { stonesPerPiece: number }[] | undefined);
+        expected += calculateSettingTimeHours(nw, pp, 0);
       }
       if (expected <= 0) continue;
       const hoursInStage = (now.getTime() - mv.enteredAt.getTime()) / 3_600_000;

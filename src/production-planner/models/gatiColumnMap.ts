@@ -16,11 +16,12 @@ export interface GatiOrderColumnEntry {
   required?: boolean;
 }
 
-/** WIP Excel: maps a raw stage-column to (stageCode, cellCode). */
+/** WIP Excel: maps a raw stage-column to (stageCode, cellCode, strength). */
 export interface GatiWipColumnEntry {
   rawColumn: string;
   stageCode: string;
   cellCode: string;
+  strength: number;
 }
 
 export interface GatiColumnMapDocument extends Document {
@@ -60,6 +61,7 @@ const GatiWipColumnEntrySchema = new Schema<GatiWipColumnEntry>(
     // a stage/cell code and shown in the Column Maps screen for the admin to fill in.
     stageCode: { type: String, required: false, default: '', trim: true, uppercase: true },
     cellCode:  { type: String, required: false, default: '', trim: true, uppercase: true },
+    strength:   { type: Number, min: 1, default: 1 },
   },
   { _id: false }
 );

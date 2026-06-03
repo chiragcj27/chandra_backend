@@ -22,6 +22,25 @@ function asStringArray(x: unknown): string[] | undefined {
   return x.filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
 }
 
+/**
+ * POST /stages/reseed
+ * Re-runs seedDefaultStages() + seedDefaultColumnMaps() on demand.
+ * Useful after deployments where the server wasn't restarted.
+ */
+router.post("/stages/reseed", requireAuth, requireRole("admin"), async (_req, res) => {
+  try {
+    const { seedDefaultStages } = await import("../services/bootstrap/seedDefaultData");
+    const { seedDefaultColumnMaps } = await import("../services/bootstrap/seedDefaultColumnMaps");
+    await seedDefaultStages();
+    await seedDefaultColumnMaps();
+    const stages = await StageDefinition.find().sort({ displayOrder: 1, code: 1 });
+    return res.status(200).json({ ok: true, message: "Stages reseeded successfully", count: stages.length, stages });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Server error";
+    return res.status(500).json({ error: message });
+  }
+});
+
 router.get("/stages", requireAuth, requireRole("admin"), async (_req, res) => {
   try {
     const stages = await StageDefinition.find().sort({ displayOrder: 1, code: 1 });

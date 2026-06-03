@@ -293,7 +293,8 @@ function buildGroupPayload(
   const styleNo = toStr(anchor.StyleCode_Repeat);
   const size = toStr(anchor.ItmItemSizeName);
   const customerCode = toStr(anchor.Customer);
-  const itemCategory = toStr(anchor.ItemCategory) ?? undefined;
+  // Support both "Category" and "ItemCategory" column names
+  const itemCategory = toStr(anchor.Category) ?? toStr(anchor.ItemCategory) ?? undefined;
   const perPcPieces  = toNumber(anchor.PerPc_Pieces) ?? undefined;
   const orderedAt = parseGatiDate(anchor.OrderDate) ?? undefined;
   const expectedDeliveryAt = parseGatiDate(anchor.ItmPrdDelDate) ?? undefined;
@@ -317,7 +318,11 @@ function buildGroupPayload(
       throw new Error(`Diamond row missing NetWeight (row ${dr.rowIndex})`);
     }
 
-    const stonesPerPiece = Math.round(totalCaratsPerPiece / pointer);
+    // Only use the raw PerPc_Pieces column — no computed fallback from NetWeight / Pointer
+    const perPcPiecesVal = toNumber(dr.raw.PerPc_Pieces);
+    const stonesPerPiece = perPcPiecesVal != null && perPcPiecesVal > 0
+      ? Math.round(perPcPiecesVal)
+      : 0;
     diamondSpecs.push({
       gSize,
       sieve,
