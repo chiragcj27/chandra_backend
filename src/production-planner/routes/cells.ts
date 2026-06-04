@@ -53,6 +53,7 @@ router.post("/cells", requireAuth, requireRole("admin"), async (req, res) => {
       code,
       name,
       stageCodes: asStringArray(body.stageCodes) ?? [],
+      workersCount: Number.isFinite(body.workersCount) ? Number(body.workersCount) : 1,
       description: asTrimmedString(body.description),
       active: typeof body.active === "boolean" ? body.active : true,
     });
@@ -80,6 +81,9 @@ router.put("/cells/:code", requireAuth, requireRole("admin"), async (req, res) =
       cell.description = asTrimmedString(body.description);
     }
     if (typeof body.active === "boolean") cell.active = body.active;
+    if (Number.isFinite(body.workersCount)) {
+      cell.workersCount = Number(body.workersCount);
+    }
 
     await cell.save();
     return res.status(200).json({ cell });

@@ -11,9 +11,9 @@ import {
  * C1 = primary worktable, C2 = second worktable, C3 = overflow / third worktable.
  */
 const DEFAULT_CELLS = [
-  { code: "C1", name: "Cell 1", stageCodes: [] },
-  { code: "C2", name: "Cell 2", stageCodes: [] },
-  { code: "C3", name: "Cell 3", stageCodes: [] },
+  { code: "C1", name: "Cell 1", stageCodes: ["CAD", "CAM", "WAX", "WAX_SET", "CASTING", "CENTERING", "GRN", "REFINING", "FILING", "ASSEMBLE", "POL", "OTEC", "WFD", "DIA_SET", "SETTING", "FINAL_POLISH", "QC", "FINISHED_GOODS", "IGI", "SAM", "MDL"], workersCount: 2 },
+  { code: "C2", name: "Cell 2", stageCodes: ["FILING", "ASSEMBLE", "POL", "SETTING", "FINAL_POLISH", "QC"], workersCount: 1 },
+  { code: "C3", name: "Cell 3", stageCodes: ["FILING", "POL", "QC", "FINISHED_GOODS"], workersCount: 1 },
 ];
 
 /**
@@ -37,12 +37,21 @@ function hasLegacyCellCodes(cols: { cellCode: string }[]): boolean {
  *     • Leaves admin-configured maps alone otherwise.
  */
 export async function seedDefaultColumnMaps(): Promise<void> {
-  // ── 1. Seed cells ──────────────────────────────────────────────────────────
+  // ── 1. Seed cells (upsert — refreshes stageCodes + workersCount on every boot) ──
   for (const cell of DEFAULT_CELLS) {
-    const exists = await Cell.findOne({ code: cell.code });
-    if (!exists) {
-      await Cell.create(cell);
-    }
+    await Cell.findOneAndUpdate(
+      { code: cell.code },
+      {
+        $set: {
+          name: cell.name,
+          stageCodes: cell.stageCodes,
+          workersCount: cell.workersCount,
+          active: true,
+        },
+        $setOnInsert: { code: cell.code },
+      },
+      { upsert: true }
+    );
   }
 
   // ── 2. Seed order column map ───────────────────────────────────────────────

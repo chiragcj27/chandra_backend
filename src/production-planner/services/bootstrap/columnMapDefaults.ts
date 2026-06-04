@@ -120,6 +120,7 @@ export const DEFAULT_WIP_COLUMNS = [
   { rawColumn: "MDL",    stageCode: "MDL",           cellCode: "MDL"   },
   // ── OUT-OF-FLOW (appear at any point) ────────────────────────────────────────
   { rawColumn: "HOLD",   stageCode: "HOLD",          cellCode: "HOLD"  },
+  { rawColumn: "Hold",   stageCode: "HOLD",          cellCode: "HOLD"  },
   { rawColumn: "JW",     stageCode: "JW",            cellCode: "JW"    },
 ];
 
@@ -147,32 +148,34 @@ export const DEFAULT_STAGE_DEFINITIONS: {
   isOptional?: boolean;
   isTerminal?: boolean;
   parallelGroup?: string;
+  /** Default units per worker-hour. Uses the stage's unitOfWork (grams/stones/piece). */
+  unitsPerWorkerHour?: number;
 }[] = [
   // ── Pre-production ────────────────────────────────────────────────────────────
-  { code: "PENDING",        name: "Pending",         displayOrder: -1, expectedDurationHours: 0   },
+  { code: "PENDING",        name: "Pending",         displayOrder: -1, expectedDurationHours: 0,   unitsPerWorkerHour: 0    },
   // ── Main flow ────────────────────────────────────────────────────────────────
-  { code: "CAD",            name: "CAD",             displayOrder: 1,  expectedDurationHours: 8   },
-  { code: "CAM",            name: "CAM",             displayOrder: 2,  expectedDurationHours: 4   },
-  { code: "WAX",            name: "Wax",             displayOrder: 3,  expectedDurationHours: 8,  parallelGroup: "WAX_FAMILY" },
-  { code: "WAX_SET",        name: "Wax Setting",     displayOrder: 4,  expectedDurationHours: 6,  parallelGroup: "WAX_FAMILY" },
-  { code: "CASTING",        name: "Casting",         displayOrder: 5,  expectedDurationHours: 12  },
-  { code: "CENTERING",      name: "Centering",       displayOrder: 6,  expectedDurationHours: 4   },
-  { code: "GRN",            name: "Grinding",        displayOrder: 7,  expectedDurationHours: 4   },
-  { code: "REFINING",       name: "Refining",        displayOrder: 8,  expectedDurationHours: 6   },
-  { code: "FILING",         name: "Filing",          displayOrder: 9,  expectedDurationHours: 8   },
-  { code: "ASSEMBLE",       name: "Assemble",        displayOrder: 10, expectedDurationHours: 6   },
-  { code: "POL",            name: "Polish",          displayOrder: 11, expectedDurationHours: 6   },
-  { code: "OTEC",           name: "OTEC",            displayOrder: 12, expectedDurationHours: 2,  isOptional: true },
-  { code: "WFD",            name: "WFD",             displayOrder: 13, expectedDurationHours: 4,  isOptional: true },
-  { code: "DIA_SET",        name: "Diamond Setting", displayOrder: 14, expectedDurationHours: 12  },
-  { code: "SETTING",        name: "Setting",         displayOrder: 15, expectedDurationHours: 10  },
-  { code: "FINAL_POLISH",   name: "Final Polish",    displayOrder: 16, expectedDurationHours: 4   },
-  { code: "QC",             name: "Quality Check",   displayOrder: 17, expectedDurationHours: 4   },
-  { code: "FINISHED_GOODS", name: "Finished Goods",  displayOrder: 18, expectedDurationHours: 2,  isTerminal: true },
-  { code: "IGI",            name: "IGI / GSL",       displayOrder: 19, expectedDurationHours: 48  },
-  { code: "SAM",            name: "Sampling",        displayOrder: 20, expectedDurationHours: 8   },
-  { code: "MDL",            name: "MDL",             displayOrder: 21, expectedDurationHours: 4   },
+  { code: "CAD",            name: "CAD",             displayOrder: 1,  expectedDurationHours: 8,   unitsPerWorkerHour: 1    },
+  { code: "CAM",            name: "CAM",             displayOrder: 2,  expectedDurationHours: 4,   unitsPerWorkerHour: 1    },
+  { code: "WAX",            name: "Wax",             displayOrder: 3,  expectedDurationHours: 8,   unitsPerWorkerHour: 2,   parallelGroup: "WAX_FAMILY" },
+  { code: "WAX_SET",        name: "Wax Setting",     displayOrder: 4,  expectedDurationHours: 6,   unitsPerWorkerHour: 2,   parallelGroup: "WAX_FAMILY" },
+  { code: "CASTING",        name: "Casting",         displayOrder: 5,  expectedDurationHours: 12,  unitsPerWorkerHour: 50   },
+  { code: "CENTERING",      name: "Centering",       displayOrder: 6,  expectedDurationHours: 4,   unitsPerWorkerHour: 20   },
+  { code: "GRN",            name: "Grinding",        displayOrder: 7,  expectedDurationHours: 4,   unitsPerWorkerHour: 20   },
+  { code: "REFINING",       name: "Refining",        displayOrder: 8,  expectedDurationHours: 6,   unitsPerWorkerHour: 50   },
+  { code: "FILING",         name: "Filing",          displayOrder: 9,  expectedDurationHours: 8,   unitsPerWorkerHour: 50   },
+  { code: "ASSEMBLE",       name: "Assemble",        displayOrder: 10, expectedDurationHours: 6,   unitsPerWorkerHour: 3    },
+  { code: "POL",            name: "Polish",          displayOrder: 11, expectedDurationHours: 6,   unitsPerWorkerHour: 4    },
+  { code: "OTEC",           name: "OTEC",            displayOrder: 12, expectedDurationHours: 2,   unitsPerWorkerHour: 4,   isOptional: true },
+  { code: "WFD",            name: "WFD",             displayOrder: 13, expectedDurationHours: 4,   unitsPerWorkerHour: 4,   isOptional: true },
+  { code: "DIA_SET",        name: "Diamond Setting", displayOrder: 14, expectedDurationHours: 12,  unitsPerWorkerHour: 12   },
+  { code: "SETTING",        name: "Setting",         displayOrder: 15, expectedDurationHours: 10,  unitsPerWorkerHour: 12   },
+  { code: "FINAL_POLISH",   name: "Final Polish",    displayOrder: 16, expectedDurationHours: 4,   unitsPerWorkerHour: 4    },
+  { code: "QC",             name: "Quality Check",   displayOrder: 17, expectedDurationHours: 4,   unitsPerWorkerHour: 9    },
+  { code: "FINISHED_GOODS", name: "Finished Goods",  displayOrder: 18, expectedDurationHours: 2,   unitsPerWorkerHour: 5,   isTerminal: true },
+  { code: "IGI",            name: "IGI / GSL",       displayOrder: 19, expectedDurationHours: 48,  unitsPerWorkerHour: 10   },
+  { code: "SAM",            name: "Sampling",        displayOrder: 20, expectedDurationHours: 8,   unitsPerWorkerHour: 5    },
+  { code: "MDL",            name: "MDL",             displayOrder: 21, expectedDurationHours: 4,   unitsPerWorkerHour: 5    },
   // ── Out-of-flow ───────────────────────────────────────────────────────────────
-  { code: "HOLD",           name: "Hold",            displayOrder: 98, expectedDurationHours: 24, isOptional: true },
-  { code: "JW",             name: "JW",              displayOrder: 99, expectedDurationHours: 4,  isOptional: true },
+  { code: "HOLD",           name: "Hold",            displayOrder: 98, expectedDurationHours: 24,  unitsPerWorkerHour: 0,   isOptional: true },
+  { code: "JW",             name: "JW",              displayOrder: 99, expectedDurationHours: 4,   unitsPerWorkerHour: 0,   isOptional: true },
 ];
