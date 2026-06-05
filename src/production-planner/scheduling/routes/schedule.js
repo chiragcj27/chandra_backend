@@ -61,6 +61,20 @@ router.get(
   }
 );
 
+
+
+router.get('/Analytics', ifAuth, ifAdmin, async (req, res) => {
+  try{
+    const days = asPositiveInt(req.query.days, 14);
+    const result = await buildSchedule({ days });
+    return res.status(200).json({ bottlenecks: result.bottlenecks.length, lateOrders: result.lateOrders.length, startToday: result.startToday.length ,totalPieces: result.pieces.length });
+  }
+  catch (err) {
+    const message = err instanceof Error ? err.message : 'Server error';
+    return res.status(500).json({ error: message });
+  }
+});
+
 /**
  * GET /schedule/today
  * Returns only the "start today" pull list — the pieces that need to begin

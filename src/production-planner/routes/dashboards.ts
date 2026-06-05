@@ -202,7 +202,7 @@ interface OrderRollup {
   worstLatenessDays: number;
   stageDistribution: { stageCode: string; cellCode: string; qty: number }[];
   priority: "normal" | "urgent" | "critical";
-  status: "pending" | "in_progress" | "on_hold" | "completed";
+  status: string;
 }
 
 function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
@@ -254,11 +254,30 @@ function rollupOneOrder(jobCards: JobCardDocument[]): OrderRollup {
     else if (jc.priority === "urgent" && priority !== "critical") priority = "urgent";
   }
 
-  let status: OrderRollup["status"];
-  if (jobCards.every((j) => j.status === "completed")) status = "completed";
-  else if (jobCards.some((j) => j.status === "on_hold")) status = "on_hold";
-  else if (jobCards.some((j) => j.status === "in_progress")) status = "in_progress";
-  else status = "pending";
+  const PROCEED_STATUSES = new Set([
+    "proceed_cancel", "proceed_po", "proceed_stock_assign",
+    "proceed_manufacturer", "proceed_pending",
+  ]);
+
+  let status: string;
+  if (jobCards.every((j) => j.status === "completed")) {
+    status = "completed";
+  } else if (jobCards.some((j) => j.status === "in_progress")) {
+    status = "in_progress";
+  } else if (jobCards.some((j) => j.status === "on_hold")) {
+    status = "on_hold";
+  } else if (jobCards.some((j) => PROCEED_STATUSES.has(j.status))) {
+    // Use the specific proceed status — pick most common one if mixed
+    const proceedCounts: Record<string, number> = {};
+    jobCards.forEach((j) => {
+      if (PROCEED_STATUSES.has(j.status)) {
+        proceedCounts[j.status] = (proceedCounts[j.status] ?? 0) + 1;
+      }
+    });
+    status = Object.entries(proceedCounts).sort((a, b) => b[1] - a[1])[0][0];
+  } else {
+    status = "pending";
+  }
 
   return {
     orderNumber,

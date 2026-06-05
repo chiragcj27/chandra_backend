@@ -108,6 +108,20 @@ export async function seedDefaultColumnMaps(): Promise<void> {
 
     if (needsMigration) {
       existingWip.wipColumns = DEFAULT_WIP_COLUMNS.map((c) => ({ ...c })) as typeof existingWip.wipColumns;
+    } else {
+      // Add NEW rawColumn variants not already in the DB map (Ref, Sam, Wax, Cam, etc.)
+      // Use direct MongoDB $push to bypass Mongoose version conflicts
+      const existingRawCols = new Set(
+        (existingWip.wipColumns as { rawColumn: string }[]).map((c) => c.rawColumn)
+      );
+      const newCols = DEFAULT_WIP_COLUMNS.filter((c) => !existingRawCols.has(c.rawColumn));
+      if (newCols.length > 0) {
+        await GatiColumnMap.updateOne(
+          { _id: existingWip._id },
+          { $push: { wipColumns: { $each: newCols.map((c) => ({ ...c })) } } }
+        );
+        console.log(`[seedDefaultColumnMaps] ✅ Saved ${newCols.length} new WIP column(s) to DB: ${newCols.map(c => c.rawColumn).join(', ')}`);
+      }
     }
 
     if (!hasAliases || needsMigration) {

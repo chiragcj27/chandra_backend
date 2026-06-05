@@ -44,84 +44,140 @@ export const DEFAULT_ORDER_COLUMNS = [
  * continue to import without changes.
  */
 export const DEFAULT_WIP_COLUMNS = [
+  // Each stage lists UPPERCASE (GatiSOFT default) + Title-case (Excel export variant)
+  // ── CAM (first in flow) ──────────────────────────────────────────────────────
+  { rawColumn: "CAM",    stageCode: "CAM",           cellCode: "CAM"   },
+  { rawColumn: "Cam",    stageCode: "CAM",           cellCode: "CAM"   },
   // ── CAD ──────────────────────────────────────────────────────────────────────
   { rawColumn: "CAD",    stageCode: "CAD",           cellCode: "CAD"   },
-  // ── CAM ──────────────────────────────────────────────────────────────────────
-  { rawColumn: "CAM",    stageCode: "CAM",           cellCode: "CAM"   },
+  { rawColumn: "Cad",    stageCode: "CAD",           cellCode: "CAD"   },
   // ── WAX ──────────────────────────────────────────────────────────────────────
   { rawColumn: "WAX",    stageCode: "WAX",           cellCode: "WAX"   },
+  { rawColumn: "Wax",    stageCode: "WAX",           cellCode: "WAX"   },
   // ── WAX SET ──────────────────────────────────────────────────────────────────
   { rawColumn: "WSET",   stageCode: "WAX_SET",       cellCode: "WSET"  },
+  { rawColumn: "Wset",   stageCode: "WAX_SET",       cellCode: "WSET"  },
   // ── CASTING ──────────────────────────────────────────────────────────────────
   { rawColumn: "CST",    stageCode: "CASTING",       cellCode: "CST"   },
+  { rawColumn: "Cst",    stageCode: "CASTING",       cellCode: "CST"   },
   // ── CENTERING ────────────────────────────────────────────────────────────────
   { rawColumn: "CEN",    stageCode: "CENTERING",     cellCode: "CEN"   },
+  { rawColumn: "Cen",    stageCode: "CENTERING",     cellCode: "CEN"   },
   // ── GRINDING ─────────────────────────────────────────────────────────────────
   { rawColumn: "GRN",    stageCode: "GRN",           cellCode: "GRN"   },
+  { rawColumn: "Grn",    stageCode: "GRN",           cellCode: "GRN"   },
+  // DRL (Drilling — maps to GRN if no dedicated stage)
+  { rawColumn: "DRL",    stageCode: "GRN",           cellCode: "GRN"   },
+  { rawColumn: "Drl",    stageCode: "GRN",           cellCode: "GRN"   },
   // ── REFINING ─────────────────────────────────────────────────────────────────
   { rawColumn: "REF",      stageCode: "REFINING",    cellCode: "REF"   },
+  { rawColumn: "Ref",      stageCode: "REFINING",    cellCode: "REF"   },
   { rawColumn: "REFINING", stageCode: "REFINING",    cellCode: "REF"   },
   // ── FILING (cells: FIL1, FIL2, FIL3, SFIL) ───────────────────────────────────
   { rawColumn: "FIL1",   stageCode: "FILING",        cellCode: "FIL1"  },
+  { rawColumn: "Fil1",   stageCode: "FILING",        cellCode: "FIL1"  },
   { rawColumn: "FIL2",   stageCode: "FILING",        cellCode: "FIL2"  },
+  { rawColumn: "Fil2",   stageCode: "FILING",        cellCode: "FIL2"  },
   { rawColumn: "FIL3",   stageCode: "FILING",        cellCode: "FIL3"  },
+  { rawColumn: "Fil3",   stageCode: "FILING",        cellCode: "FIL3"  },
   { rawColumn: "SFIL",   stageCode: "FILING",        cellCode: "SFIL"  },
-  // backward compat (old hyphen names)
+  { rawColumn: "Sfil",   stageCode: "FILING",        cellCode: "SFIL"  },
+  // backward compat (single/hyphen)
   { rawColumn: "FIL",    stageCode: "FILING",        cellCode: "FIL1"  },
+  { rawColumn: "Fil",    stageCode: "FILING",        cellCode: "FIL1"  },
   { rawColumn: "FIL-2",  stageCode: "FILING",        cellCode: "FIL2"  },
+  { rawColumn: "Fil-2",  stageCode: "FILING",        cellCode: "FIL2"  },
   { rawColumn: "FIL-3",  stageCode: "FILING",        cellCode: "FIL3"  },
+  { rawColumn: "Fil-3",  stageCode: "FILING",        cellCode: "FIL3"  },
   // ── ASSEMBLE (cells: ASBL, ASBL_1, ASBL_2, ASBL_3) ──────────────────────────
   { rawColumn: "ASBL",   stageCode: "ASSEMBLE",      cellCode: "ASBL"   },
+  { rawColumn: "Asbl",   stageCode: "ASSEMBLE",      cellCode: "ASBL"   },
   { rawColumn: "ASBL_1", stageCode: "ASSEMBLE",      cellCode: "ASBL_1" },
+  { rawColumn: "Asbl_1", stageCode: "ASSEMBLE",      cellCode: "ASBL_1" },
   { rawColumn: "ASBL_2", stageCode: "ASSEMBLE",      cellCode: "ASBL_2" },
+  { rawColumn: "Asbl_2", stageCode: "ASSEMBLE",      cellCode: "ASBL_2" },
+  { rawColumn: "Asbl2",  stageCode: "ASSEMBLE",      cellCode: "ASBL_2" },
   { rawColumn: "ASBL_3", stageCode: "ASSEMBLE",      cellCode: "ASBL_3" },
+  { rawColumn: "Asbl_3", stageCode: "ASSEMBLE",      cellCode: "ASBL_3" },
+  { rawColumn: "Asbl-3", stageCode: "ASSEMBLE",      cellCode: "ASBL_3" },
   // ── POLISH (cells: POL_1, POL_2, POL_3, SPOL) ────────────────────────────────
   { rawColumn: "POL_1",  stageCode: "POL",           cellCode: "POL_1" },
+  { rawColumn: "Pol_1",  stageCode: "POL",           cellCode: "POL_1" },
   { rawColumn: "POL_2",  stageCode: "POL",           cellCode: "POL_2" },
+  { rawColumn: "Pol_2",  stageCode: "POL",           cellCode: "POL_2" },
   { rawColumn: "POL_3",  stageCode: "POL",           cellCode: "POL_3" },
+  { rawColumn: "Pol_3",  stageCode: "POL",           cellCode: "POL_3" },
   { rawColumn: "SPOL",   stageCode: "POL",           cellCode: "SPOL"  },
+  { rawColumn: "Spol",   stageCode: "POL",           cellCode: "SPOL"  },
   // backward compat (old PPL names)
   { rawColumn: "PPL",    stageCode: "POL",           cellCode: "POL_1" },
+  { rawColumn: "Ppl",    stageCode: "POL",           cellCode: "POL_1" },
   { rawColumn: "PPL_1",  stageCode: "POL",           cellCode: "POL_1" },
+  { rawColumn: "Ppl_1",  stageCode: "POL",           cellCode: "POL_1" },
   { rawColumn: "PPL_2",  stageCode: "POL",           cellCode: "POL_2" },
+  { rawColumn: "Ppl_2",  stageCode: "POL",           cellCode: "POL_2" },
   { rawColumn: "PPL_3",  stageCode: "POL",           cellCode: "POL_3" },
+  { rawColumn: "Ppl_3",  stageCode: "POL",           cellCode: "POL_3" },
   { rawColumn: "PPL-2",  stageCode: "POL",           cellCode: "POL_2" },
-  // ── OTEC (optional — after POL) ───────────────────────────────────────────────
+  { rawColumn: "Ppl-2",  stageCode: "POL",           cellCode: "POL_2" },
+  { rawColumn: "PPL-3",  stageCode: "POL",           cellCode: "POL_3" },
+  { rawColumn: "Ppl-3",  stageCode: "POL",           cellCode: "POL_3" },
+  // ── OTEC (optional) ───────────────────────────────────────────────────────────
   { rawColumn: "OTEC",   stageCode: "OTEC",          cellCode: "OTEC"  },
   { rawColumn: "Otec",   stageCode: "OTEC",          cellCode: "OTEC"  },
-  // ── WFD (optional — after PPL or OTEC) ───────────────────────────────────────
+  // ── WFD (optional) ───────────────────────────────────────────────────────────
   { rawColumn: "WFD",    stageCode: "WFD",           cellCode: "WFD"   },
+  { rawColumn: "Wfd",    stageCode: "WFD",           cellCode: "WFD"   },
   // ── DIAMOND SETTING ──────────────────────────────────────────────────────────
   { rawColumn: "DIA",    stageCode: "DIA_SET",       cellCode: "DIA"   },
+  { rawColumn: "Dia",    stageCode: "DIA_SET",       cellCode: "DIA"   },
   // ── SETTING ──────────────────────────────────────────────────────────────────
   { rawColumn: "SET",    stageCode: "SETTING",       cellCode: "SET"   },
+  { rawColumn: "Set",    stageCode: "SETTING",       cellCode: "SET"   },
   // ── FINAL POLISH (cells: FPL1, FPL2, FPL3) ───────────────────────────────────
   { rawColumn: "FPL1",   stageCode: "FINAL_POLISH",  cellCode: "FPL1"  },
+  { rawColumn: "Fpl1",   stageCode: "FINAL_POLISH",  cellCode: "FPL1"  },
   { rawColumn: "FPL2",   stageCode: "FINAL_POLISH",  cellCode: "FPL2"  },
+  { rawColumn: "Fpl2",   stageCode: "FINAL_POLISH",  cellCode: "FPL2"  },
   { rawColumn: "FPL3",   stageCode: "FINAL_POLISH",  cellCode: "FPL3"  },
+  { rawColumn: "Fpl3",   stageCode: "FINAL_POLISH",  cellCode: "FPL3"  },
   // backward compat
   { rawColumn: "FPL",    stageCode: "FINAL_POLISH",  cellCode: "FPL1"  },
+  { rawColumn: "Fpl",    stageCode: "FINAL_POLISH",  cellCode: "FPL1"  },
   { rawColumn: "FPL-3",  stageCode: "FINAL_POLISH",  cellCode: "FPL3"  },
+  { rawColumn: "Fpl-3",  stageCode: "FINAL_POLISH",  cellCode: "FPL3"  },
   // ── QC ───────────────────────────────────────────────────────────────────────
   { rawColumn: "QC",     stageCode: "QC",            cellCode: "QC"    },
+  { rawColumn: "Qc",     stageCode: "QC",            cellCode: "QC"    },
   // ── FINISHED GOODS (cells: FG1, FG2, FG3) ────────────────────────────────────
   { rawColumn: "FG1",    stageCode: "FINISHED_GOODS", cellCode: "FG1"  },
+  { rawColumn: "Fg1",    stageCode: "FINISHED_GOODS", cellCode: "FG1"  },
   { rawColumn: "FG2",    stageCode: "FINISHED_GOODS", cellCode: "FG2"  },
+  { rawColumn: "Fg2",    stageCode: "FINISHED_GOODS", cellCode: "FG2"  },
   { rawColumn: "FG3",    stageCode: "FINISHED_GOODS", cellCode: "FG3"  },
+  { rawColumn: "Fg3",    stageCode: "FINISHED_GOODS", cellCode: "FG3"  },
   // backward compat
   { rawColumn: "FG",     stageCode: "FINISHED_GOODS", cellCode: "FG1"  },
+  { rawColumn: "Fg",     stageCode: "FINISHED_GOODS", cellCode: "FG1"  },
   { rawColumn: "FG 2",   stageCode: "FINISHED_GOODS", cellCode: "FG2"  },
+  { rawColumn: "Fg 2",   stageCode: "FINISHED_GOODS", cellCode: "FG2"  },
   // ── IGI / GSL ────────────────────────────────────────────────────────────────
   { rawColumn: "IGI",    stageCode: "IGI",           cellCode: "IGI"   },
+  { rawColumn: "Igi",    stageCode: "IGI",           cellCode: "IGI"   },
   { rawColumn: "GSL",    stageCode: "IGI",           cellCode: "GSL"   },
+  { rawColumn: "Gsl",    stageCode: "IGI",           cellCode: "GSL"   },
   // ── SAMPLING ─────────────────────────────────────────────────────────────────
   { rawColumn: "SAM",    stageCode: "SAM",           cellCode: "SAM"   },
+  { rawColumn: "Sam",    stageCode: "SAM",           cellCode: "SAM"   },
   // ── MDL ──────────────────────────────────────────────────────────────────────
   { rawColumn: "MDL",    stageCode: "MDL",           cellCode: "MDL"   },
   // ── OUT-OF-FLOW (appear at any point) ────────────────────────────────────────
   { rawColumn: "HOLD",   stageCode: "HOLD",          cellCode: "HOLD"  },
   { rawColumn: "Hold",   stageCode: "HOLD",          cellCode: "HOLD"  },
   { rawColumn: "JW",     stageCode: "JW",            cellCode: "JW"    },
+  { rawColumn: "Jw",     stageCode: "JW",            cellCode: "JW"    },
+  // ── SFIL (sample filing — under FILING) ──────────────────────────────────────
+  { rawColumn: "Sfil",   stageCode: "FILING",        cellCode: "SFIL"  },
 ];
 
 /**
@@ -154,8 +210,8 @@ export const DEFAULT_STAGE_DEFINITIONS: {
   // ── Pre-production ────────────────────────────────────────────────────────────
   { code: "PENDING",        name: "Pending",         displayOrder: -1, expectedDurationHours: 0,   unitsPerWorkerHour: 0    },
   // ── Main flow ────────────────────────────────────────────────────────────────
-  { code: "CAD",            name: "CAD",             displayOrder: 1,  expectedDurationHours: 8,   unitsPerWorkerHour: 1    },
-  { code: "CAM",            name: "CAM",             displayOrder: 2,  expectedDurationHours: 4,   unitsPerWorkerHour: 1    },
+  { code: "CAM",            name: "CAM",             displayOrder: 1,  expectedDurationHours: 4,   unitsPerWorkerHour: 1    },
+  { code: "CAD",            name: "CAD",             displayOrder: 2,  expectedDurationHours: 8,   unitsPerWorkerHour: 1    },
   { code: "WAX",            name: "Wax",             displayOrder: 3,  expectedDurationHours: 8,   unitsPerWorkerHour: 2,   parallelGroup: "WAX_FAMILY" },
   { code: "WAX_SET",        name: "Wax Setting",     displayOrder: 4,  expectedDurationHours: 6,   unitsPerWorkerHour: 2,   parallelGroup: "WAX_FAMILY" },
   { code: "CASTING",        name: "Casting",         displayOrder: 5,  expectedDurationHours: 12,  unitsPerWorkerHour: 50   },
