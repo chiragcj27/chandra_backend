@@ -13,6 +13,19 @@ import { parseWorkbookFromBuffer } from "./excelParser";
 import { toNumber, toStr } from "./columnMapper";
 import { calculateSettingTimeHours, getTotalDiamondCarats, resolvePerPcPieces, SETTING_STAGE_CODES } from "../production/settingTimeTable";
 
+/**
+ * WIP "Proceed *" columns are administrative statuses, NOT production stages.
+ * When a piece has a non-zero value in one of these columns, its job card status
+ * is overridden to the mapped value regardless of stage distribution.
+ */
+const PROCEED_STATUS_COLUMNS: Record<string, string> = {
+  "Proceed Cancel":          "proceed_cancel",
+  "Proceed Po":              "proceed_po",
+  "Proceed Stock Assign":    "proceed_stock_assign",
+  "Proceed Manufacturer":    "proceed_manufacturer",
+  "Proceed Pending":         "proceed_pending",
+};
+
 export interface IngestWipInput {
   buffer: Buffer;
   fileName: string;
@@ -104,13 +117,11 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     let skipped = 0;
 
     // Non-stage columns — skip when walking stage columns.
-    const RESERVED_COLUMNS = new Set([
-      "Book Name",
-      "OrderNo+SrNo",
-      "Style No",
-      "BalanceQty",
-      "PendingQty",
-      "OnFloor",
+    // Lowercase for case-insensitive matching (Excel varies: OnFloor/Onfloor, BalanceQty/Balanceqty)
+    const RESERVED_COLUMNS_LOWER = new Set([
+      "book name", "orderno+srno", "style no",
+      "balanceqty", "pendingqty", "onfloor", "on floor",
+      "ord",   // summary order qty column (not a stage)
     ]);
 
     // ── First pass: collect valid rows ───────────────────────────────────────
@@ -121,13 +132,18 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
       rowIndex: number;
       pieceCode: string;
       balanceQty: number;
+      pendingQty: number;
     }
     const validRows: ValidWipRow[] = [];
     for (let i = 0; i < parsed.rows.length; i++) {
       const raw = parsed.rows[i];
       const pieceCode = toStr(raw["OrderNo+SrNo"]);
       if (!pieceCode) continue;
-      validRows.push({ raw, rowIndex: i + 2, pieceCode, balanceQty: toNumber(raw.BalanceQty) ?? 0 });
+      // Accept both casings: BalanceQty (old) and Balanceqty (GatiSOFT export)
+      // Also read Pendingqty — if > 0 the piece is still in-queue even if no stage cols
+      const balanceQty  = toNumber(raw.BalanceQty)  ?? toNumber(raw.Balanceqty)  ?? 0;
+      const pendingQty  = toNumber(raw.PendingQty)  ?? toNumber(raw.Pendingqty)  ?? 0;
+      validRows.push({ raw, rowIndex: i + 2, pieceCode, balanceQty, pendingQty });
     }
 
     // ── Single DB round-trip for all job cards ───────────────────────────────
@@ -163,7 +179,7 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
     // at the end will apply the correct stage-proportional shift anyway.
     const enteredAtStamp = now;
 
-    for (const { raw, rowIndex, pieceCode, balanceQty } of validRows) {
+    for (const { raw, rowIndex, pieceCode, balanceQty, pendingQty } of validRows) {
       const jobCard = jobCardMap.get(pieceCode);
       if (!jobCard) {
         rowErrors.push({
@@ -174,13 +190,23 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
       }
 
       // Build the new distribution from non-zero stage columns.
+      // Separately detect "Proceed *" columns — these set the job card status,
+      // they are NOT added to currentStageDistribution.
       const newDistribution: StageDistributionEntry[] = [];
       let rowHasUnmappedNonZero = false;
+      let proceedStatus: string | null = null;
 
       for (const [col, val] of Object.entries(raw)) {
-        if (RESERVED_COLUMNS.has(col)) continue;
+        if (RESERVED_COLUMNS_LOWER.has(col.trim().toLowerCase())) continue;
         const qty = toNumber(val);
         if (qty == null || qty === 0) continue;
+
+        // Check if this is a "Proceed *" status column (not a stage)
+        const proceed = PROCEED_STATUS_COLUMNS[col.trim()];
+        if (proceed) {
+          proceedStatus = proceed; // last non-zero proceed column wins
+          continue;              // do NOT add to stage distribution
+        }
 
         const mapped = stageCellByColumn.get(col.trim());
         if (!mapped) {
@@ -217,10 +243,12 @@ export async function ingestWipFile(input: IngestWipInput): Promise<GatiImportRu
         );
 
       const result = await applyWipDiff(
-          jobCard, newDistribution, balanceQty,
+          jobCard, newDistribution, balanceQty, pendingQty,
           { terminalStageCodes, onHoldStageCodes },
           pendingMovements, pendingJobCardUpdates, now, enteredAtStamp,
-          jcStageFlow, prevEnteredAtMap, isTestDelay
+          jcStageFlow, prevEnteredAtMap, isTestDelay,
+          rowHasUnmappedNonZero,
+          proceedStatus           // ← override status when piece is in admin state
         );
         if (result.changed) updated++;
         else skipped++;
@@ -414,6 +442,7 @@ async function applyWipDiff(
   jobCard: JobCardDocument,
   newDistribution: StageDistributionEntry[],
   balanceQty: number,
+  pendingQty: number,
   opts: DiffOptions,
   pendingMovements: PendingMovement[],
   pendingJobCardUpdates: PendingJobCardUpdate[],
@@ -421,7 +450,9 @@ async function applyWipDiff(
   enteredAtStamp: Date = now,
   stageFlow: StageFlowEntry[] = [],
   prevEnteredAtMap: Map<string, Date> = new Map(),
-  skipSmartEnteredAt = false    // true in test-delay mode — use enteredAtStamp as-is
+  skipSmartEnteredAt = false,      // true in test-delay mode — use enteredAtStamp as-is
+  hasUnmappedNonZero = false,     // true if row had non-zero values in unmapped columns
+  proceedStatus: string | null = null  // "proceed_*" override from Proceed columns
 ): Promise<DiffResult> {
   const keyOf = (e: { stageCode: string; cellCode: string }) => `${e.stageCode}|${e.cellCode}`;
   const oldMap = new Map<string, StageDistributionEntry>();
@@ -521,7 +552,19 @@ async function applyWipDiff(
   const anyHold = newDistribution.some((e) => opts.onHoldStageCodes.has(e.stageCode));
 
   let nextStatus: JobCardStatus = jobCard.status;
-  if (balanceQty === 0 || (allTerminal && totalQtyInDistribution >= jobCard.totalQty)) {
+  // Only mark completed when:
+  //   a) balanceQty=0 AND no distribution AND no unmapped stage values AND no pending qty, OR
+  //   b) all distribution is at terminal stages with sufficient qty.
+  // pendingQty > 0 means the piece is still in queue (not yet on the floor) → keep as pending.
+  // balanceQty=0 alone must NOT complete if pendingQty > 0 or unmapped stages exist.
+  const isCompleted =
+    (balanceQty === 0 && pendingQty === 0 && newDistribution.length === 0 && !hasUnmappedNonZero) ||
+    (allTerminal && totalQtyInDistribution >= jobCard.totalQty);
+
+  if (proceedStatus) {
+    // Administrative proceed status takes precedence over production status
+    nextStatus = proceedStatus as JobCardStatus;
+  } else if (isCompleted) {
     nextStatus = "completed";
   } else if (anyHold) {
     nextStatus = "on_hold";

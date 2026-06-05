@@ -25,6 +25,7 @@ export async function seedDefaultStages(): Promise<void> {
           isTerminal:            s.isTerminal  ?? false,
           active:                true,
           expectedDurationHours: s.expectedDurationHours ?? 24,
+          unitsPerWorkerHour:    s.unitsPerWorkerHour,
           ...(s.parallelGroup != null ? { parallelGroup: s.parallelGroup } : {}),
         },
         // Only set structural fields on first insert

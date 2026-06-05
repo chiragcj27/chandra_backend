@@ -23,6 +23,7 @@ import stagesRouter from "./routes/stages";
 import schedulingRouter from "./scheduling";
 import whatIfRouter from "./routes/whatIf";
 import { seedDefaultStages } from "./services/bootstrap/seedDefaultData";
+import { seedDefaultColumnMaps } from "./services/bootstrap/seedDefaultColumnMaps";
 import { refreshAllETAs } from "./services/production/etaService";
 
 /**
@@ -42,17 +43,17 @@ import { refreshAllETAs } from "./services/production/etaService";
  */
 const router = Router();
 
-// Seed predefined stages into DB on startup (idempotent — never overwrites admin edits).
+// Seed stages + column maps on startup (idempotent — safe to run every restart).
+// Column map seed adds any new rawColumn variants (e.g. Wax, Cam) to the existing DB map.
 seedDefaultStages()
+  .then(() => seedDefaultColumnMaps())
   .then(() =>
-    // Immediately recompute ETAs after seeding so plannedCompletionAt is
-    // populated on first request — even before the 60-second scheduler fires.
     refreshAllETAs().catch((e) =>
       console.error("[ProductionPlanner] startup ETA refresh error:", (e as Error).message)
     )
   )
   .catch((err) =>
-    console.error("[ProductionPlanner] Stage seed error:", (err as Error).message)
+    console.error("[ProductionPlanner] Startup seed error:", (err as Error).message)
   );
 
 // Phase 0

@@ -14,6 +14,12 @@ export const JOB_CARD_STATUSES = [
   "on_hold",
   "completed",
   "cancelled",
+  // Administrative proceed statuses from WIP "Proceed *" columns
+  "proceed_cancel",
+  "proceed_po",
+  "proceed_stock_assign",
+  "proceed_manufacturer",
+  "proceed_pending",
 ] as const;
 export type JobCardStatus = (typeof JOB_CARD_STATUSES)[number];
 

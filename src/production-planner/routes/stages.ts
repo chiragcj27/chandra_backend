@@ -84,6 +84,7 @@ router.post("/stages", requireAuth, requireRole("admin"), async (req, res) => {
       dependencies: asStringArray(body.dependencies) ?? [],
       parallelGroup: asTrimmedString(body.parallelGroup),
       unitOfWork: asUnitOfWork(body.unitOfWork) ?? "piece",
+      unitsPerWorkerHour: Number.isFinite(body.unitsPerWorkerHour) ? Number(body.unitsPerWorkerHour) : undefined,
       isOptional: typeof body.isOptional === "boolean" ? body.isOptional : false,
       isTerminal: typeof body.isTerminal === "boolean" ? body.isTerminal : false,
       displayOrder: Number.isFinite(body.displayOrder) ? Number(body.displayOrder) : 0,
@@ -126,6 +127,9 @@ router.put("/stages/:code", requireAuth, requireRole("admin"), async (req, res) 
     if (typeof body.isTerminal === "boolean") stage.isTerminal = body.isTerminal;
     if (Number.isFinite(body.displayOrder)) stage.displayOrder = Number(body.displayOrder);
     if (typeof body.active === "boolean") stage.active = body.active;
+    if (Number.isFinite(body.unitsPerWorkerHour)) {
+      stage.unitsPerWorkerHour = Number(body.unitsPerWorkerHour);
+    }
 
     const description = asTrimmedString(body.description);
     if (typeof body.description === "string") stage.description = description;
