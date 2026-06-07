@@ -81,6 +81,19 @@ function todayISO() {
 }
 
 /**
+ * Validate and normalise a YYYY-MM-DD string.
+ * Returns the string as-is if valid, otherwise returns todayISO().
+ * @param {string|undefined} dateStr
+ * @returns {string}
+ */
+function resolveStartDate(dateStr) {
+  if (typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return dateStr;
+  }
+  return todayISO();
+}
+
+/**
  * Add N days to a YYYY-MM-DD string and return a new YYYY-MM-DD string.
  * @param {string} dateISO
  * @param {number} offsetDays
@@ -171,8 +184,8 @@ function buildRemainingWork(pieces, stages) {
  * @param {number} dailyHours - working hours per day
  * @returns {Array<Object>} pieces with .latestStart, .latestEnd, .slackDays
  */
-function backwardSchedule(pieces, cellsByStage, dailyHours) {
-  const today = todayISO();
+function backwardSchedule(pieces, cellsByStage, dailyHours, windowStart) {
+  const today = windowStart || todayISO();
 
   for (const piece of pieces) {
     const remaining = piece.remainingWork;
@@ -238,8 +251,8 @@ function backwardSchedule(pieces, cellsByStage, dailyHours) {
  * @param {number} dailyHours - working hours per day
  * @returns {Object} { grid, plan }
  */
-function forwardFill(pieces, windowDays, cellsByStage, dailyHours) {
-  const today = todayISO();
+function forwardFill(pieces, windowDays, cellsByStage, dailyHours, windowStart) {
+  const today = windowStart || todayISO();
 
   // Priority sort key: map priority to number (critical=0, urgent=1, normal=2).
   const priorityWeight = { critical: 0, urgent: 1, normal: 2 };
@@ -412,8 +425,9 @@ function forwardFill(pieces, windowDays, cellsByStage, dailyHours) {
  * @param {number} windowDays
  * @returns {Object} { grid, pieces, bottlenecks, lateOrders, startToday }
  */
-function rollupOutputs(pieces, plan, grid, windowDays) {
-  const today = todayISO();
+function rollupOutputs(pieces, plan, grid, windowDays, windowStart, targetDate) {
+  const today = windowStart || todayISO();
+  const filterDate = targetDate || today;
 
   // Per-piece itineraries.
   const pieceResults = pieces.map((piece) => {
@@ -428,6 +442,11 @@ function rollupOutputs(pieces, plan, grid, windowDays) {
 
     return {
       gatiPieceCode: piece.gatiPieceCode,
+      orderNumber: piece.orderNumber,
+      totalQty: piece.totalQty,
+      itemCategory: piece.itemCategory,
+      status: piece.status,
+      currentStageDistribution: piece.currentStageDistribution || [],
       priority: piece.priority,
       shipBy: piece.expectedDeliveryAt,
       slackDays: piece.slackDays,
@@ -468,20 +487,38 @@ function rollupOutputs(pieces, plan, grid, windowDays) {
       slipDays: p.slipDays,
     }));
 
-  // Start-today list: pieces with at least one planned entry for today.
-  const startToday = pieceResults
-    .filter((p) => p.planned.some((e) => e.day === today))
-    .map((p) => ({
-      gatiPieceCode: p.gatiPieceCode,
-      priority: p.priority,
-      slackDays: p.slackDays,
-    }))
-    .sort((a, b) => {
-      const pw = { critical: 0, urgent: 1, normal: 2 };
-      return (pw[a.priority] ?? 2) - (pw[b.priority] ?? 2);
-    });
+  // Start-today list: pending pieces that should start today, grouped by order + category.
+  const startToday = Object.values(
+    pieceResults
+      .filter((p) => p.status === 'pending' && p.planned.some((e) => e.day === filterDate))
+      .reduce((acc, p) => {
+        const key = `${p.orderNumber}|${p.itemCategory || 'Unknown'}`;
+        if (!acc[key]) {
+          acc[key] = {
+            orderNumber: p.orderNumber,
+            itemCategory: p.itemCategory || null,
+            qty: 0,
+            priority: p.priority,
+          };
+        }
+        acc[key].qty += p.totalQty || 0;
+        return acc;
+      }, {})
+  ).sort((a, b) => {
+    const pw = { critical: 0, urgent: 1, normal: 2 };
+    return (pw[a.priority] ?? 2) - (pw[b.priority] ?? 2);
+  });
 
-  return { grid, pieces: pieceResults, bottlenecks, lateOrders, startToday };
+  const stageLoad = Object.entries(grid.find((d) => d.day === filterDate)?.byStage || {}).map(([stage, data]) => ({
+    stage,
+    workerHoursUsed: data.workerHoursUsed,
+    workerHoursAvailable: data.workerHoursAvailable,
+    utilisation: data.workerHoursAvailable > 0
+      ? Math.round((data.workerHoursUsed / data.workerHoursAvailable) * 10000) / 100
+      : 0,
+  }));
+
+  return { grid, pieces: pieceResults, bottlenecks, lateOrders, startToday, stageLoad };
 }
 
 // ---------------------------------------------------------------------------
@@ -492,15 +529,18 @@ function rollupOutputs(pieces, plan, grid, windowDays) {
  * Build the production schedule.
  *
  * @param {Object} [options]
- * @param {number} [options.days] - Scheduling horizon (default 14)
+ * @param {number} [options.days]        - Scheduling horizon (default 14)
+ * @param {string} [options.startDate]   - YYYY-MM-DD to start the window from (default today)
+ * @param {string} [options.targetDate]  - YYYY-MM-DD to filter startToday / stageLoad for (default windowStart)
  * @param {Object} [options.overrides]
  * @param {Object<string,number>} [options.overrides.addWorkersByCell] - Extra workers per cell for what-if
  * @param {number} [options.overrides.overtimeHoursPerDay] - Extra hours per day for what-if
  * @returns {Promise<{ grid: Object[], pieces: Object[], bottlenecks: Object[], lateOrders: Object[], startToday: Object[] }>}
  */
 async function buildSchedule(options = {}) {
-  const windowDays = options.days || DEFAULT_WINDOW_DAYS;
-  const overrides = options.overrides || {};
+  const windowDays  = options.days || DEFAULT_WINDOW_DAYS;
+  const windowStart = resolveStartDate(options.startDate); // YYYY-MM-DD, defaults to today
+  const overrides   = options.overrides || {};
 
   // -----------------------------------------------------------------------
   // 1. Load all reference data (fresh every run — all admin-editable).
@@ -557,21 +597,22 @@ async function buildSchedule(options = {}) {
   buildRemainingWork(pieces, stages);
 
   // Pass 2 — Backward schedule to compute latest-start and slack.
-  backwardSchedule(pieces, cellsByStage, effectiveDailyHours);
+  backwardSchedule(pieces, cellsByStage, effectiveDailyHours, windowStart);
 
   // Pass 3 — Forward fill under finite per-cell worker-hour budgets.
   const { grid, plan } = forwardFill(
     pieces,
     windowDays,
     cellsByStage,
-    effectiveDailyHours
+    effectiveDailyHours,
+    windowStart
   );
 
   // -----------------------------------------------------------------------
   // 4. Roll up into the final output format.
   // -----------------------------------------------------------------------
 
-  return rollupOutputs(pieces, plan, grid, windowDays);
+  return rollupOutputs(pieces, plan, grid, windowDays, windowStart, options.targetDate);
 }
 
 module.exports = { buildSchedule };
