@@ -2,6 +2,8 @@ const { Router } = require('express');
 
 const { requireAuth, requireRole } = require('../../../middleware/requireAuth');
 const { buildSchedule } = require('../services/scheduleService');
+const { JobCard }       = require('../../models/jobCard');
+const { StageDefinition } = require('../../models/stageDefinition');
 
 const router = Router();
 
@@ -51,8 +53,9 @@ router.get(
   ifAdmin,
   async (req, res) => {
     try {
-      const days = asPositiveInt(req.query.days, 14);
-      const result = await buildSchedule({ days });
+      const days      = asPositiveInt(req.query.days, 14);
+      const startDate = asNonEmptyString(req.query.startDate); // YYYY-MM-DD, optional
+      const result    = await buildSchedule({ days, startDate });
       return res.status(200).json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Server error';
@@ -63,11 +66,11 @@ router.get(
 
 
 
-router.get('/Analytics', ifAuth, ifAdmin, async (req, res) => {
+router.get('/schedule/Analytics', ifAuth, ifAdmin, async (req, res) => {
   try{
     const days = asPositiveInt(req.query.days, 14);
     const result = await buildSchedule({ days });
-    return res.status(200).json({ bottlenecks: result.bottlenecks.length, lateOrders: result.lateOrders.length, startToday: result.startToday.length ,totalPieces: result.pieces.length });
+    return res.status(200).json({ bottlenecks: result.bottlenecks.length, lateOrders: result.lateOrders.length, startToday: result.startToday.length, totalPieces: result.pieces.length });
   }
   catch (err) {
     const message = err instanceof Error ? err.message : 'Server error';
@@ -76,21 +79,109 @@ router.get('/Analytics', ifAuth, ifAdmin, async (req, res) => {
 });
 
 /**
- * GET /schedule/today
- * Returns only the "start today" pull list — the pieces that need to begin
- * their next stage right now. This is what the floor supervisor sees.
+ * GET /schedule/live-stages
+ * Returns ACTUAL current stage distribution from live JobCard data.
+ * This matches exactly what the tracking screen shows.
  *
  * Returns:
- *   { startToday: [{ gatiPieceCode, priority, slackDays }] }
+ *   {
+ *     stages: [
+ *       {
+ *         stageCode: "FILING",
+ *         stageName: "Filing",
+ *         pieceCount: 12,
+ *         pieces: [{ gatiPieceCode, priority, cellCode, qty }]
+ *       }, ...
+ *     ],
+ *     totalPieces: 34,
+ *     asOf: "2026-06-06"
+ *   }
+ */
+router.get(
+  '/schedule/live-stages',
+  ifAuth,
+  ifAdmin,
+  async (_req, res) => {
+    try {
+      // Load all open JobCards with their current stage distribution
+      const [jobCards, stageDefs] = await Promise.all([
+        JobCard.find({
+          status: { $in: ['pending', 'in_progress', 'on_hold'] },
+          'currentStageDistribution.0': { $exists: true }, // has at least one stage entry
+        }).lean(),
+        StageDefinition.find({ active: true }).lean(),
+      ]);
+
+      // Build stageCode → name map
+      const stageNames = {};
+      for (const s of stageDefs) stageNames[s.code] = s.name;
+
+      // Group pieces by their current stage
+      const stageMap = {};
+
+      for (const card of jobCards) {
+        for (const dist of (card.currentStageDistribution || [])) {
+          const code = dist.stageCode;
+          if (!stageMap[code]) {
+            stageMap[code] = {
+              stageCode: code,
+              stageName: stageNames[code] || code,
+              pieceCount: 0,
+              pieces: [],
+            };
+          }
+          stageMap[code].pieceCount += 1;
+          stageMap[code].pieces.push({
+            gatiPieceCode: card.gatiPieceCode,
+            priority:      card.priority || 'normal',
+            cellCode:      dist.cellCode || null,
+            qty:           dist.qty      || 1,
+          });
+        }
+      }
+
+      // Sort stages by displayOrder
+      const stageOrder = {};
+      stageDefs.forEach((s, i) => { stageOrder[s.code] = s.displayOrder ?? i; });
+
+      const stages = Object.values(stageMap).sort(
+        (a, b) => (stageOrder[a.stageCode] ?? 999) - (stageOrder[b.stageCode] ?? 999)
+      );
+
+      const today = new Date();
+      const asOf  = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+      return res.status(200).json({
+        stages,
+        totalPieces: jobCards.length,
+        asOf,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Server error';
+      return res.status(500).json({ error: message });
+    }
+  }
+);
+
+/**
+ * GET /schedule/today
+ * Returns pending orders that should start on the given date, grouped by order.
+ *
+ * Query:
+ *   date - YYYY-MM-DD (default: today)
+ *
+ * Returns:
+ *   { startToday: [{ orderNumber, qty, itemCategory, priority }], stageLoad: [...] }
  */
 router.get(
   '/schedule/today',
   ifAuth,
   ifAdmin,
-  async (_req, res) => {
+  async (req, res) => {
     try {
-      const result = await buildSchedule();
-      return res.status(200).json({ startToday: result.startToday });
+      const date = req.query.date || new Date().toISOString().split('T')[0];
+      const result = await buildSchedule({ targetDate: date });
+      return res.status(200).json({ startToday: result.startToday, stageLoad: result.stageLoad });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Server error';
       return res.status(500).json({ error: message });
