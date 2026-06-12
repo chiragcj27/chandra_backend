@@ -487,10 +487,12 @@ function rollupOutputs(pieces, plan, grid, windowDays, windowStart, targetDate) 
       slipDays: p.slipDays,
     }));
 
-  // Start-today list: pending pieces that should start today, grouped by order + category.
+  // Pieces with work scheduled on filterDate — grouped by order + category.
+  // Includes all statuses (pending, in_progress, on_hold) so the floor supervisor
+  // sees every item that needs attention on the selected date.
   const startToday = Object.values(
     pieceResults
-      .filter((p) => p.status === 'pending' && p.planned.some((e) => e.day === filterDate))
+      .filter((p) => p.planned.some((e) => e.day === filterDate))
       .reduce((acc, p) => {
         const key = `${p.orderNumber}|${p.itemCategory || 'Unknown'}`;
         if (!acc[key]) {

@@ -179,8 +179,16 @@ router.get(
   ifAdmin,
   async (req, res) => {
     try {
-      const date = req.query.date || new Date().toISOString().split('T')[0];
-      const result = await buildSchedule({ targetDate: date });
+      const todayStr  = new Date().toISOString().split('T')[0];
+      const date      = asNonEmptyString(req.query.date) || todayStr;
+
+      // Ensure the schedule window reaches the requested date.
+      // e.g. if today=Jun 8 and date=Jun 25, we need at least 18 days.
+      const msOffset   = new Date(date + 'T00:00:00') - new Date(todayStr + 'T00:00:00');
+      const daysOffset = Math.max(0, Math.ceil(msOffset / 86_400_000));
+      const days       = Math.max(14, daysOffset + 1);
+
+      const result = await buildSchedule({ days, targetDate: date });
       return res.status(200).json({ startToday: result.startToday, stageLoad: result.stageLoad });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Server error';
