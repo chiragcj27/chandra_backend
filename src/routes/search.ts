@@ -1,4 +1,5 @@
 import { Router } from "express";
+import pluralize from "pluralize";
 import { Category } from "../models/Category";
 import { Subcategory } from "../models/Subcategory";
 import { SubcategoryProfile } from "../models/SubcategoryProfile";
@@ -9,6 +10,17 @@ const router = Router();
 /** Escapes special regex characters so raw user input is safe to query. */
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Expands a word to its singular and plural forms so "necklace" and
+ * "necklaces" match the same documents regardless of which form is stored
+ * (e.g. a Category named "Necklace" vs. a filter tag stored as "Necklaces").
+ * Plain substring matching alone is asymmetric here: "necklace" is a
+ * substring of "Necklaces", but "necklaces" is not a substring of "Necklace".
+ */
+function wordVariants(word: string): string[] {
+  return [...new Set([word, pluralize.singular(word), pluralize.plural(word)])];
 }
 
 /**
@@ -23,7 +35,8 @@ function buildAnyWordQuery(
   words: string[]
 ): Record<string, unknown> {
   const conditions = words.map((word) => {
-    const re = new RegExp(escapeRegex(word), "i");
+    const alternation = wordVariants(word).map(escapeRegex).join("|");
+    const re = new RegExp(alternation, "i");
     if (fields.length === 1) return { [fields[0]]: re };
     return { $or: fields.map((f) => ({ [f]: re })) };
   });

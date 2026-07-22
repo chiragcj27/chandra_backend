@@ -3,6 +3,7 @@ import { Router } from "express";
 import { requireAuth, requireRole } from "../middleware/requireAuth";
 import { Category } from "../models/Category";
 import { ClientUser } from "../models/ClientUser";
+import { Counter } from "../models/Counter";
 import { LegacyClient } from "../models/LegacyClient";
 import { Order } from "../models/Order";
 import { Product } from "../models/Product";
@@ -11,11 +12,16 @@ import { SubcategoryProfile } from "../models/SubcategoryProfile";
 
 const router = Router();
 
-function createOrderNumber(): string {
-  const prefix = "ORD";
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const entropy = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `${prefix}-${timestamp}-${entropy}`;
+const ORDER_NUMBER_START = 10000;
+
+async function createOrderNumber(): Promise<string> {
+  const counter = await Counter.findByIdAndUpdate(
+    "orderNumber",
+    { $inc: { seq: 1 } },
+    { upsert: true, new: true }
+  );
+  const seq = (counter?.seq ?? 1) + ORDER_NUMBER_START - 1;
+  return String(seq);
 }
 
 async function buildEnrichedOrderItems(
@@ -178,8 +184,9 @@ router.post("/orders", requireAuth, requireRole("client"), async (req, res) => {
 
     const now = new Date();
     const enrichedItems = await buildEnrichedOrderItems(items);
+    const orderNumber = await createOrderNumber();
     const order = await Order.create({
-      orderNumber: createOrderNumber(),
+      orderNumber,
       clientId: String(userId),
       clientName: resolvedClientName,
       clientUsername: resolvedClientUsername,
