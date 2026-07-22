@@ -1,5 +1,6 @@
 import { Router } from "express";
 
+import productionPlannerRouter from "../../production-planner";
 import adminAuthRouter from "./auth";
 import adminClientsRouter from "./clients";
 import adminUploadsRouter from "./uploads";
@@ -17,6 +18,7 @@ router.use(adminBannersRouter);
 router.use(adminCategoriesRouter);
 router.use(adminOrdersRouter);
 router.use(adminFeaturedCollectionsRouter);
+router.use("/production", productionPlannerRouter);
 
 export default router;
 
