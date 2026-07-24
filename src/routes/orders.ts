@@ -106,39 +106,15 @@ async function buildEnrichedOrderItems(
   );
 }
 
-router.post("/orders", requireAuth, requireRole("client"), async (req, res) => {
+router.post("/orders", requireAuth, requireRole(["client", "admin"]), async (req, res) => {
   try {
-    const userId = req.user?.id;
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const requesterId = req.user?.id;
+    if (!requesterId) return res.status(401).json({ error: "Unauthorized" });
 
-    const tokenUsername = String(req.user?.username || req.user?.email || "").trim();
-    const tokenClientName = String(req.user?.clientName || "").trim();
-    const client =
-      (await ClientUser.findById(userId).select("clientName username")) ||
-      (tokenUsername
-        ? await ClientUser.findOne({ username: tokenUsername.toLowerCase() }).select("clientName username")
-        : null);
-    const legacyClient = await LegacyClient.findById(userId).select("Name");
-    const legacyClientName = String(legacyClient?.Name || "").trim();
-
-    const resolvedClientUsername =
-      client?.username ||
-      (tokenUsername.includes("@") ? tokenUsername.split("@")[0] : tokenUsername) ||
-      `client_${String(userId).slice(-6)}`;
-    const resolvedClientName =
-      client?.clientName ||
-      tokenClientName ||
-      legacyClientName ||
-      resolvedClientUsername;
-
-    if (!resolvedClientUsername || !resolvedClientName) {
-      return res.status(400).json({
-        error:
-          "Client identity not resolved. Ensure token includes username/email/clientName or create mapped ClientUser.",
-      });
-    }
+    const isAdmin = req.user?.role === "admin";
 
     const body = req.body as {
+      clientId?: string;
       items?: Array<{
         productId?: string;
         styleNo?: string;
@@ -157,6 +133,47 @@ router.post("/orders", requireAuth, requireRole("client"), async (req, res) => {
       totalAmount?: number;
       orderMeta?: Record<string, unknown>;
     };
+
+    let targetClientId = requesterId;
+    if (isAdmin) {
+      const requestedClientId = String(body.clientId || "").trim();
+      if (!/^[a-f0-9]{24}$/i.test(requestedClientId)) {
+        return res.status(400).json({ error: "A valid clientId is required to place an order as admin" });
+      }
+      targetClientId = requestedClientId;
+    }
+
+    const tokenUsername = String(req.user?.username || req.user?.email || "").trim();
+    const tokenClientName = String(req.user?.clientName || "").trim();
+    const client = await ClientUser.findById(targetClientId).select("clientName username").catch(() => null);
+    const clientByUsername =
+      !client && !isAdmin && tokenUsername
+        ? await ClientUser.findOne({ username: tokenUsername.toLowerCase() }).select("clientName username")
+        : null;
+    const legacyClient = await LegacyClient.findById(targetClientId).select("Name").catch(() => null);
+    const legacyClientName = String(legacyClient?.Name || "").trim();
+    const resolvedClient = client || clientByUsername;
+
+    if (isAdmin && !resolvedClient && !legacyClientName) {
+      return res.status(404).json({ error: "Client not found" });
+    }
+
+    const resolvedClientUsername =
+      resolvedClient?.username ||
+      (!isAdmin && (tokenUsername.includes("@") ? tokenUsername.split("@")[0] : tokenUsername)) ||
+      `client_${String(targetClientId).slice(-6)}`;
+    const resolvedClientName =
+      resolvedClient?.clientName ||
+      legacyClientName ||
+      (!isAdmin && tokenClientName) ||
+      resolvedClientUsername;
+
+    if (!resolvedClientUsername || !resolvedClientName) {
+      return res.status(400).json({
+        error:
+          "Client identity not resolved. Ensure token includes username/email/clientName or create mapped ClientUser.",
+      });
+    }
 
     const items = Array.isArray(body.items) ? body.items : [];
     if (!items.length) {
@@ -187,9 +204,10 @@ router.post("/orders", requireAuth, requireRole("client"), async (req, res) => {
     const orderNumber = await createOrderNumber();
     const order = await Order.create({
       orderNumber,
-      clientId: String(userId),
+      clientId: String(targetClientId),
       clientName: resolvedClientName,
       clientUsername: resolvedClientUsername,
+      placedByAdminId: isAdmin ? String(requesterId) : undefined,
       status: "order_received",
       items: enrichedItems,
       billingAddress: body.billingAddress,
@@ -202,8 +220,8 @@ router.post("/orders", requireAuth, requireRole("client"), async (req, res) => {
         {
           status: "order_received",
           changedAt: now,
-          changedBy: { id: String(userId), role: "client" },
-          note: "Order created by client",
+          changedBy: { id: String(requesterId), role: isAdmin ? "admin" : "client" },
+          note: isAdmin ? "Order placed by admin on behalf of client" : "Order created by client",
         },
       ],
     });

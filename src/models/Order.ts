@@ -46,6 +46,7 @@ export interface OrderDocument extends Document {
   clientId: string;
   clientName: string;
   clientUsername: string;
+  placedByAdminId?: string;
   status: OrderStatus;
   items: OrderItem[];
   billingAddress?: string;
@@ -104,6 +105,7 @@ const OrderSchema = new Schema<OrderDocument>(
     clientId: { type: String, required: true, trim: true, index: true },
     clientName: { type: String, required: true, trim: true },
     clientUsername: { type: String, required: true, trim: true },
+    placedByAdminId: { type: String, trim: true },
     status: { type: String, required: true, enum: ORDER_STATUSES, default: "order_received", index: true },
     items: { type: [OrderItemSchema], default: [] },
     billingAddress: { type: String, trim: true },

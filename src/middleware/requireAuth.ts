@@ -26,10 +26,11 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   }
 }
 
-export function requireRole(role: JwtRole) {
+export function requireRole(role: JwtRole | JwtRole[]) {
+  const allowedRoles = Array.isArray(role) ? role : [role];
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-    if (req.user.role !== role) return res.status(403).json({ error: "Forbidden" });
+    if (!allowedRoles.includes(req.user.role)) return res.status(403).json({ error: "Forbidden" });
     return next();
   };
 }
